@@ -68,6 +68,7 @@ tracks burn-down against that allocation.
 
 ```
 src/budget_agent/
+  service.py        # FastAPI surface: /health, / (info), read-only /analyze, /plan
   orchestrator.py   # analyze→plan→propose→approve→execute state machine
   approval.py       # human-approval gate for money-moving actions
   tools.py          # typed clients for the aggregator/analyzer/planner tools
@@ -76,6 +77,23 @@ src/budget_agent/
 tests/
 ```
 
+## Deploy to Azure (Container Apps)
+
+Runs as an **Azure Container App** provisioned by `budget-infra` (the `budgetai-agent`
+app on port 8000, bound to the shared managed identity). The infra deployment wires the
+tool URLs (`AGGREGATOR_URL`/`ANALYZER_URL`/`PLANNER_URL`) to the deployed tool container
+apps and sets `REQUIRE_APPROVAL=true` and `AZURE_KEY_VAULT_URI`.
+
+Deploy `budget-infra` first, then set the GitHub **secrets** `AZURE_CLIENT_ID` /
+`AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` and **variables** `AZURE_RESOURCE_GROUP`,
+`ACR_NAME`, and `CONTAINER_APP_NAME` (`budgetai-agent`). Push to `main` (or run
+**Deploy (Agent)**) to build via `az acr build` and roll the container app.
+
+Only the read-only phases are exposed over HTTP; `/analyze` and `/plan` return HTTP 501
+until the tool clients are implemented (M4/M5). The money-moving `execute` phase is not
+exposed over ingress.
+
 ## Status
 
-Scaffold. See the project board (Project #1) for the task plan.
+Scaffold with a FastAPI health/info surface, containerized and deployable to Azure
+Container Apps. Tool clients (aggregator/analyzer/planner) are stubs pending M4/M5.
