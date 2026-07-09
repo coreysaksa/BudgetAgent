@@ -19,8 +19,9 @@ from pydantic import BaseModel
 
 from .approval import ApprovalPolicy
 from .config import Settings
-from .models import Goal
+from .models import BudgetPlan, Goal
 from .orchestrator import Orchestrator
+from .reasoning import build_reasoner
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
 app = FastAPI(title="budget-agent")
@@ -95,3 +96,21 @@ class PlanRequest(BaseModel):
 @app.post("/plan")
 def plan(req: PlanRequest) -> Any:
     return _guard(lambda: _orchestrator().plan(req.analysis, req.goals))
+
+
+class AdviseRequest(BaseModel):
+    analysis: dict[str, Any]
+    plan: BudgetPlan
+
+
+@app.post("/advise")
+def advise(req: AdviseRequest) -> dict[str, str]:
+    """Return an LLM narrative + recommendations for a plan (read-only, no execution)."""
+    reasoner = build_reasoner(_settings())
+    if reasoner is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Azure OpenAI is not configured (set AZURE_OPENAI_ENDPOINT).",
+        )
+    text = _guard(lambda: reasoner.advise(req.analysis, req.plan))
+    return {"advice": text}
