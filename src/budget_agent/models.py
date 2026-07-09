@@ -53,6 +53,9 @@ class BudgetLine(BaseModel):
 
 class BudgetPlan(BaseModel):
     period: str  # e.g. "2026-07"
+    monthly_income: float = 0.0
     lines: list[BudgetLine] = Field(default_factory=list)
     petty_cash_allocation: float = 0.0
+    goal_contributions: dict[str, float] = Field(default_factory=dict)
+    unallocated: float = 0.0
     goals: list[Goal] = Field(default_factory=list)

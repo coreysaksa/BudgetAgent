@@ -4,6 +4,7 @@ from __future__ import annotations
 from enum import Enum
 
 from .approval import ApprovalPolicy, MoneyAction
+from .audit import AuditLog
 from .models import BudgetPlan, Goal
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
@@ -24,11 +25,13 @@ class Orchestrator:
         analyzer: AnalyzerClient,
         planner: PlannerClient,
         policy: ApprovalPolicy,
+        audit: AuditLog | None = None,
     ) -> None:
         self.aggregator = aggregator
         self.analyzer = analyzer
         self.planner = planner
         self.policy = policy
+        self.audit = audit or AuditLog()
 
     def analyze(self):
         """Pull transactions (read-only) and analyze spending."""
@@ -40,15 +43,34 @@ class Orchestrator:
         """Build a budget from goals + analyzed spending."""
         return self.planner.build_plan(analysis, goals)
 
-    def propose(self, plan: BudgetPlan) -> list[MoneyAction]:
+    def propose(
+        self,
+        plan: BudgetPlan,
+        source_account_id: str = "",
+        petty_cash_account_id: str = "",
+    ) -> list[MoneyAction]:
         """Recommend money movements to realize the plan (not yet executed)."""
-        # Placeholder: derive recommended transfers from the plan.
-        return []
+        actions: list[MoneyAction] = []
+        if plan.petty_cash_allocation > 0:
+            actions.append(
+                MoneyAction(
+                    kind="petty_cash_topup",
+                    amount=plan.petty_cash_allocation,
+                    source_account_id=source_account_id,
+                    dest_account_id=petty_cash_account_id,
+                    reason=f"Fund petty cash for {plan.period} per budget plan.",
+                )
+            )
+        return actions
 
     def execute(self, actions: list[MoneyAction], approvals: dict[str, bool]) -> None:
         """Apply approved actions. Money movement passes through the approval gate."""
         for action in actions:
-            self.policy.guard(action, human_approved=approvals.get(action.kind, False))
+            self.policy.guard(
+                action,
+                human_approved=approvals.get(action.kind, False),
+                audit=self.audit,
+            )
             # TODO: perform the (approved) action via the execution adapter.
 
     def track(self, plan: BudgetPlan):

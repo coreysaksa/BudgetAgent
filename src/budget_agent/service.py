@@ -13,6 +13,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any, Callable
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -41,13 +42,23 @@ def _orchestrator() -> Orchestrator:
 
 
 def _guard(fn: Callable[[], Any]) -> Any:
-    """Run an orchestrator call, surfacing not-yet-implemented tools as HTTP 501."""
+    """Run an orchestrator call, surfacing tool/transport failures as HTTP errors."""
     try:
         return fn()
     except NotImplementedError as exc:
         raise HTTPException(
             status_code=501,
-            detail="Tool clients are not implemented yet (M4/M5).",
+            detail="This capability is not implemented yet (M5).",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream tool returned {exc.response.status_code}.",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to reach an upstream tool: {exc}",
         ) from exc
 
 

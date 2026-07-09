@@ -7,6 +7,10 @@ narrow, opt-in policy marks as safe (e.g. a capped top-up to the petty-cash acco
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .audit import AuditLog
 
 
 @dataclass
@@ -36,9 +40,22 @@ class ApprovalPolicy:
             and 0 < action.amount <= self.auto_topup_cap
         )
 
-    def guard(self, action: MoneyAction, human_approved: bool = False) -> None:
-        if human_approved or self.is_auto_allowed(action):
+    def guard(
+        self,
+        action: MoneyAction,
+        human_approved: bool = False,
+        audit: "AuditLog | None" = None,
+    ) -> None:
+        if human_approved:
+            if audit is not None:
+                audit.record(action, "human_approved")
             return
+        if self.is_auto_allowed(action):
+            if audit is not None:
+                audit.record(action, "auto_approved")
+            return
+        if audit is not None:
+            audit.record(action, "denied")
         raise ApprovalRequired(
             f"Action '{action.kind}' for {action.amount} requires human approval."
         )
