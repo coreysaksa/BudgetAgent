@@ -68,7 +68,8 @@ tracks burn-down against that allocation.
 
 ```
 src/budget_agent/
-  service.py        # FastAPI surface: /health, / (info), read-only /analyze, /plan
+  service.py        # FastAPI surface: /health, / (info), /analyze, /plan, /advise,
+                    #   /recommend (read-only), /execute (guardrailed, dry-run only)
   orchestrator.py   # analyze→plan→propose→approve→execute state machine
   approval.py       # human-approval gate for money-moving actions
   tools.py          # typed clients for the aggregator/analyzer/planner tools
@@ -82,18 +83,32 @@ tests/
 Runs as an **Azure Container App** provisioned by `budget-infra` (the `budgetai-agent`
 app on port 8000, bound to the shared managed identity). The infra deployment wires the
 tool URLs (`AGGREGATOR_URL`/`ANALYZER_URL`/`PLANNER_URL`) to the deployed tool container
-apps and sets `REQUIRE_APPROVAL=true` and `AZURE_KEY_VAULT_URI`.
+apps and sets `REQUIRE_APPROVAL=true`, `MAX_ACTION_AMOUNT` (per-action guardrail), and
+`AZURE_KEY_VAULT_URI`.
 
 Deploy `budget-infra` first, then set the GitHub **secrets** `AZURE_CLIENT_ID` /
 `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` and **variables** `AZURE_RESOURCE_GROUP`,
 `ACR_NAME`, and `CONTAINER_APP_NAME` (`budgetai-agent`). Push to `main` (or run
 **Deploy (Agent)**) to build via `az acr build` and roll the container app.
 
-Only the read-only phases are exposed over HTTP; `/analyze` and `/plan` return HTTP 501
-until the tool clients are implemented (M4/M5). The money-moving `execute` phase is not
-exposed over ingress.
+## Recommendation & approval (M5)
+
+The agent supports a **read-only recommendation mode** and a **guardrailed approval
+workflow**:
+
+- `POST /recommend` — runs analyze → plan → propose and returns the analysis, budget
+  plan, and proposed money actions. Purely read-only: it never moves money. Pass
+  `include_advice: true` to also get an LLM narrative (when Azure OpenAI is configured).
+- `POST /execute` — validates proposed actions against the approval gate **and** a hard
+  per-action limit (`MAX_ACTION_AMOUNT`), reporting each action's would-be outcome
+  (`would_execute` / `approval_required` / `rejected_guardrail`). This runs **dry-run
+  only** — live money movement is deferred, so no funds are moved. Over-limit actions are
+  rejected even with human approval, and every decision is written to the audit log.
+
+Notifications (surfacing recommendations for approval) are handled by the Copilot agent
+layer and are out of scope for this service.
 
 ## Status
 
-Scaffold with a FastAPI health/info surface, containerized and deployable to Azure
-Container Apps. Tool clients (aggregator/analyzer/planner) are stubs pending M4/M5.
+Read-only recommendation mode and a guardrailed, dry-run approval workflow are live.
+Live money movement remains deferred pending a reviewed execution adapter.

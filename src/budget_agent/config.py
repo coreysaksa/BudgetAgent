@@ -13,6 +13,7 @@ def _bool(name: str, default: bool) -> bool:
 class Settings:
     require_approval: bool = True
     auto_topup_cap: float = 0.0
+    max_action_amount: float = 0.0
     key_vault_uri: str = ""
     aggregator_url: str = "http://localhost:8001"
     analyzer_url: str = "http://localhost:8002"
@@ -26,6 +27,7 @@ class Settings:
         return cls(
             require_approval=_bool("REQUIRE_APPROVAL", True),
             auto_topup_cap=float(os.getenv("AUTO_TOPUP_CAP", "0")),
+            max_action_amount=float(os.getenv("MAX_ACTION_AMOUNT", "0")),
             key_vault_uri=os.getenv("AZURE_KEY_VAULT_URI", ""),
             aggregator_url=os.getenv("AGGREGATOR_URL", "http://localhost:8001"),
             analyzer_url=os.getenv("ANALYZER_URL", "http://localhost:8002"),

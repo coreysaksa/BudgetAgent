@@ -1,9 +1,17 @@
 """The analyze -> plan -> propose -> approve -> execute -> track state machine."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
-from .approval import ApprovalPolicy, MoneyAction
+from .approval import (
+    ApprovalPolicy,
+    ApprovalRequired,
+    ExecutionResult,
+    GuardrailViolation,
+    MoneyAction,
+)
 from .audit import AuditLog
 from .models import BudgetPlan, Goal
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
@@ -16,6 +24,14 @@ class Phase(str, Enum):
     APPROVE = "approve"
     EXECUTE = "execute"
     TRACK = "track"
+
+
+@dataclass
+class Recommendation:
+    """Read-only output of the recommend flow: analysis + plan + proposed actions."""
+    analysis: dict[str, Any]
+    plan: BudgetPlan
+    proposed_actions: list[MoneyAction] = field(default_factory=list)
 
 
 class Orchestrator:
@@ -63,15 +79,71 @@ class Orchestrator:
             )
         return actions
 
-    def execute(self, actions: list[MoneyAction], approvals: dict[str, bool]) -> None:
-        """Apply approved actions. Money movement passes through the approval gate."""
-        for action in actions:
-            self.policy.guard(
-                action,
-                human_approved=approvals.get(action.kind, False),
-                audit=self.audit,
+    def recommend(
+        self,
+        goals: list[Goal],
+        source_account_id: str = "",
+        petty_cash_account_id: str = "",
+    ) -> Recommendation:
+        """Read-only mode: analyze -> plan -> propose. Never moves money."""
+        analysis = self.analyze()
+        plan = self.plan(analysis, goals)
+        actions = self.propose(plan, source_account_id, petty_cash_account_id)
+        return Recommendation(analysis=analysis, plan=plan, proposed_actions=actions)
+
+    def execute(
+        self,
+        actions: list[MoneyAction],
+        approvals: dict[str, bool],
+        dry_run: bool = True,
+    ) -> list[ExecutionResult]:
+        """Run actions through the approval gate + guardrails.
+
+        Live money movement is deferred (high risk), so only dry-run is supported: each
+        action is validated and its would-be outcome is reported without moving money.
+        """
+        if not dry_run:
+            raise NotImplementedError(
+                "Live money movement is deferred; only dry_run execution is supported."
             )
-            # TODO: perform the (approved) action via the execution adapter.
+        results: list[ExecutionResult] = []
+        for action in actions:
+            try:
+                self.policy.guard(
+                    action,
+                    human_approved=approvals.get(action.kind, False),
+                    audit=self.audit,
+                )
+                results.append(
+                    ExecutionResult(
+                        kind=action.kind,
+                        amount=action.amount,
+                        status="would_execute",
+                        dry_run=True,
+                        detail="Dry run: approved and validated; no money moved.",
+                    )
+                )
+            except GuardrailViolation as exc:
+                results.append(
+                    ExecutionResult(
+                        kind=action.kind,
+                        amount=action.amount,
+                        status="rejected_guardrail",
+                        dry_run=True,
+                        detail=str(exc),
+                    )
+                )
+            except ApprovalRequired as exc:
+                results.append(
+                    ExecutionResult(
+                        kind=action.kind,
+                        amount=action.amount,
+                        status="approval_required",
+                        dry_run=True,
+                        detail=str(exc),
+                    )
+                )
+        return results
 
     def track(self, plan: BudgetPlan):
         """Fully-automated: recompute progress toward goals and budget lines."""
