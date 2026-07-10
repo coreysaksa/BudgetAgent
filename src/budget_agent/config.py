@@ -18,8 +18,8 @@ class Settings:
     analyzer_url: str = "http://localhost:8002"
     planner_url: str = "http://localhost:8003"
     azure_openai_endpoint: str = ""
-    azure_openai_deployment: str = "gpt-4o-mini"
-    azure_openai_api_version: str = "2024-10-21"
+    azure_openai_deployment: str = "gpt-5-mini"
+    azure_openai_api_version: str = "2025-04-01-preview"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -31,6 +31,6 @@ class Settings:
             analyzer_url=os.getenv("ANALYZER_URL", "http://localhost:8002"),
             planner_url=os.getenv("PLANNER_URL", "http://localhost:8003"),
             azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
-            azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini"),
-            azure_openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+            azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini"),
+            azure_openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
         )

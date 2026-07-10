@@ -62,7 +62,6 @@ class Reasoner:
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(user_payload, default=str)},
             ],
-            temperature=0.2,
         )
         return resp.choices[0].message.content or ""
 
