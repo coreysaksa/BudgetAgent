@@ -72,6 +72,7 @@ src/budget_agent/
                     #   /recommend (read-only), /execute (guardrailed, dry-run only)
   orchestrator.py   # analyze→plan→propose→approve→execute state machine
   approval.py       # human-approval gate for money-moving actions
+  notifications.py  # webhook notifier — fires when proposed actions await approval
   tools.py          # typed clients for the aggregator/analyzer/planner tools
   config.py         # settings (Key Vault refs, approval policy)
   models.py         # shared domain models
@@ -105,8 +106,11 @@ workflow**:
   only** — live money movement is deferred, so no funds are moved. Over-limit actions are
   rejected even with human approval, and every decision is written to the audit log.
 
-Notifications (surfacing recommendations for approval) are handled by the Copilot agent
-layer and are out of scope for this service.
+Notifications (surfacing recommendations for approval) are delivered via a configurable
+webhook: set `NOTIFICATION_WEBHOOK_URL` to an HTTPS endpoint and the agent will POST a
+JSON payload whenever `recommend` proposes actions that await human approval. The payload
+contains `event`, `period`, and `actions` fields. When `NOTIFICATION_WEBHOOK_URL` is
+unset the step is silently skipped.
 
 ## Status
 

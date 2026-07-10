@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from .approval import ApprovalPolicy, MoneyAction
 from .config import Settings
 from .models import BudgetPlan, Goal
+from .notifications import Notifier
 from .orchestrator import Orchestrator
 from .reasoning import build_reasoner
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
@@ -40,6 +41,7 @@ def _orchestrator() -> Orchestrator:
             auto_topup_cap=s.auto_topup_cap,
             max_action_amount=s.max_action_amount,
         ),
+        notifier=Notifier(s.notification_webhook_url),
     )
 
 
