@@ -21,6 +21,7 @@ class Settings:
     azure_openai_endpoint: str = ""
     azure_openai_deployment: str = "gpt-5-mini"
     azure_openai_api_version: str = "2025-04-01-preview"
+    notification_webhook_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -35,4 +36,5 @@ class Settings:
             azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
             azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini"),
             azure_openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
+            notification_webhook_url=os.getenv("NOTIFICATION_WEBHOOK_URL", ""),
         )

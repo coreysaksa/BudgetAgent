@@ -14,6 +14,7 @@ from .approval import (
 )
 from .audit import AuditLog
 from .models import BudgetPlan, Goal
+from .notifications import Notifier
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
 
@@ -42,12 +43,14 @@ class Orchestrator:
         planner: PlannerClient,
         policy: ApprovalPolicy,
         audit: AuditLog | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         self.aggregator = aggregator
         self.analyzer = analyzer
         self.planner = planner
         self.policy = policy
         self.audit = audit or AuditLog()
+        self.notifier = notifier or Notifier()
 
     def analyze(self):
         """Pull transactions (read-only) and analyze spending."""
@@ -85,10 +88,16 @@ class Orchestrator:
         source_account_id: str = "",
         petty_cash_account_id: str = "",
     ) -> Recommendation:
-        """Read-only mode: analyze -> plan -> propose. Never moves money."""
+        """Read-only mode: analyze -> plan -> propose. Never moves money.
+
+        After proposing actions, a notification is dispatched (if configured) so a
+        human reviewer can inspect and approve them before any execution step.
+        """
         analysis = self.analyze()
         plan = self.plan(analysis, goals)
         actions = self.propose(plan, source_account_id, petty_cash_account_id)
+        if actions:
+            self.notifier.notify_proposed(actions, plan.period)
         return Recommendation(analysis=analysis, plan=plan, proposed_actions=actions)
 
     def execute(
