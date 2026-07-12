@@ -25,6 +25,17 @@ _SYSTEM_PROMPT = (
     "user's explicit approval."
 )
 
+_CHAT_SYSTEM_PROMPT = (
+    "You are BudgetAI, a friendly, careful personal-finance assistant chatting with the "
+    "user about their money. You may be given a JSON snapshot of their current spending "
+    "analysis (accounts, spending by category, income vs. outflow). Answer questions "
+    "clearly and specifically, citing real numbers from the snapshot when relevant, and "
+    "highlight concrete, prioritized areas where they could improve their budget. Keep "
+    "replies concise. If the snapshot is empty, say you don't see any connected accounts "
+    "yet and suggest connecting a bank or uploading a statement. You can explain and "
+    "advise, but you never move money — transfers require the user's explicit approval."
+)
+
 
 class ChatClient(Protocol):
     """Minimal structural type for an OpenAI-style chat client."""
@@ -62,6 +73,42 @@ class Reasoner:
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(user_payload, default=str)},
             ],
+        )
+        return resp.choices[0].message.content or ""
+
+    def chat(
+        self,
+        message: str,
+        analysis: dict[str, Any] | None = None,
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Free-form conversational reply grounded in the user's spending snapshot.
+
+        ``history`` is a list of prior ``{"role": "user"|"assistant", "content": ...}``
+        turns; ``analysis`` is the latest spending analysis (may be empty when no
+        accounts are connected yet).
+        """
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": _CHAT_SYSTEM_PROMPT}
+        ]
+        if analysis:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Current financial snapshot (JSON):\n"
+                    + json.dumps(analysis, default=str),
+                }
+            )
+        for turn in history or []:
+            role = turn.get("role")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": message})
+
+        resp = self._client.chat.completions.create(
+            model=self._deployment,
+            messages=messages,
         )
         return resp.choices[0].message.content or ""
 

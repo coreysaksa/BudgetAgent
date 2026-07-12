@@ -119,6 +119,38 @@ def advise(req: AdviseRequest) -> dict[str, str]:
     return {"advice": text}
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[ChatMessage] = []
+
+
+@app.post("/chat")
+def chat(req: ChatRequest) -> dict[str, str]:
+    """Free-form conversational Q&A about the user's finances (read-only, no execution).
+
+    Pulls a fresh spending analysis to ground the reply. If the tool services are
+    unreachable (e.g. no bank linked yet), the chat still works with an empty snapshot.
+    """
+    reasoner = build_reasoner(_settings())
+    if reasoner is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Azure OpenAI is not configured (set AZURE_OPENAI_ENDPOINT).",
+        )
+    try:
+        analysis = _orchestrator().analyze()
+    except Exception:  # noqa: BLE001 - chat degrades gracefully without a snapshot
+        analysis = {}
+    history = [{"role": m.role, "content": m.content} for m in req.history]
+    reply = _guard(lambda: reasoner.chat(req.message, analysis, history))
+    return {"reply": reply}
+
+
 class RecommendRequest(BaseModel):
     goals: list[Goal] = []
     source_account_id: str = ""
