@@ -124,17 +124,27 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class ChatGoal(BaseModel):
+    name: str
+    target_amount: float = 0.0
+    monthly_contribution: float | None = None
+
+
 class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
+    goals: list[ChatGoal] = []
 
 
 @app.post("/chat")
-def chat(req: ChatRequest) -> dict[str, str]:
-    """Free-form conversational Q&A about the user's finances (read-only, no execution).
+def chat(req: ChatRequest) -> dict[str, Any]:
+    """Conversational finance chat that can also build a plan and manage the
+    user's savings goals (read-only w.r.t. money — never moves funds).
 
     Pulls a fresh spending analysis to ground the reply. If the tool services are
-    unreachable (e.g. no bank linked yet), the chat still works with an empty snapshot.
+    unreachable (e.g. no bank linked yet), the chat still works with an empty
+    snapshot. Returns ``{reply, goals_updated, goals}``; when ``goals_updated`` is
+    true the caller should persist the returned goal set.
     """
     reasoner = build_reasoner(_settings())
     if reasoner is None:
@@ -147,8 +157,10 @@ def chat(req: ChatRequest) -> dict[str, str]:
     except Exception:  # noqa: BLE001 - chat degrades gracefully without a snapshot
         analysis = {}
     history = [{"role": m.role, "content": m.content} for m in req.history]
-    reply = _guard(lambda: reasoner.chat(req.message, analysis, history))
-    return {"reply": reply}
+    current_goals = [g.model_dump() for g in req.goals]
+    return _guard(
+        lambda: reasoner.chat_and_plan(req.message, analysis, history, current_goals)
+    )
 
 
 class RecommendRequest(BaseModel):

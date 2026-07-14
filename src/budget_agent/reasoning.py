@@ -36,6 +36,29 @@ _CHAT_SYSTEM_PROMPT = (
     "advise, but you never move money — transfers require the user's explicit approval."
 )
 
+_PLAN_SYSTEM_PROMPT = (
+    "You are BudgetAI, a friendly, careful personal-finance assistant. The user manages "
+    "their savings goals by talking to you — this is the ONLY way their goals change.\n\n"
+    "You are given (as JSON) the user's current goals, and possibly a snapshot of their "
+    "spending analysis. Behave as follows:\n"
+    "- When the user tells you about a goal to add, change, or remove, or asks you to plan "
+    "for a goal: write a short, concrete plan in `reply` — reference real numbers from the "
+    "snapshot when possible and suggest a realistic monthly contribution and rough "
+    "timeline. Then set `goals_updated` to true and return in `goals` the COMPLETE updated "
+    "list of goals: keep every existing goal the user did NOT ask to change, apply their "
+    "additions and edits, and omit any goal they asked to remove.\n"
+    "- When the user is just asking a question and NOT changing goals, set `goals_updated` "
+    "to false and return the current goals unchanged in `goals`.\n"
+    "- Never invent goals the user didn't ask for. Always pick sensible values: if the user "
+    "gives a target amount, estimate a monthly contribution; if they give a monthly amount, "
+    "you may leave target_amount at your best estimate or 0.\n\n"
+    "Each goal is an object: {\"name\": string, \"target_amount\": number, "
+    "\"monthly_contribution\": number or null}. "
+    "Respond with ONLY a compact JSON object of the form: "
+    "{\"reply\": string, \"goals_updated\": boolean, \"goals\": [goal, ...]}. "
+    "Do not wrap it in markdown or add any text outside the JSON."
+)
+
 
 class ChatClient(Protocol):
     """Minimal structural type for an OpenAI-style chat client."""
@@ -111,6 +134,94 @@ class Reasoner:
             messages=messages,
         )
         return resp.choices[0].message.content or ""
+
+    def chat_and_plan(
+        self,
+        message: str,
+        analysis: dict[str, Any] | None = None,
+        history: list[dict[str, str]] | None = None,
+        current_goals: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Conversational reply that can also add/edit/remove savings goals.
+
+        Returns ``{"reply": str, "goals_updated": bool, "goals": list}``. When
+        ``goals_updated`` is true, ``goals`` is the complete desired goal set the
+        caller should persist (replacing the prior set); otherwise ``goals`` is
+        the unchanged current set and callers should leave storage untouched.
+        """
+        current_goals = current_goals or []
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": _PLAN_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": "Current goals (JSON):\n"
+                + json.dumps(current_goals, default=str),
+            },
+        ]
+        if analysis:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Current financial snapshot (JSON):\n"
+                    + json.dumps(analysis, default=str),
+                }
+            )
+        for turn in history or []:
+            role = turn.get("role")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": message})
+
+        resp = self._client.chat.completions.create(
+            model=self._deployment,
+            messages=messages,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or ""
+        return self._parse_plan_response(raw, current_goals)
+
+    @staticmethod
+    def _parse_plan_response(
+        raw: str, current_goals: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Parse the model's JSON reply, degrading gracefully on malformed output."""
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            # Fall back to treating the whole text as a plain reply, changing nothing.
+            return {"reply": raw, "goals_updated": False, "goals": current_goals}
+
+        reply = str(data.get("reply") or "")
+        goals_updated = bool(data.get("goals_updated"))
+        goals_raw = data.get("goals")
+        if not goals_updated or not isinstance(goals_raw, list):
+            return {"reply": reply, "goals_updated": False, "goals": current_goals}
+
+        goals: list[dict[str, Any]] = []
+        for g in goals_raw:
+            if not isinstance(g, dict):
+                continue
+            name = str(g.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                target = float(g.get("target_amount") or 0)
+            except (TypeError, ValueError):
+                target = 0.0
+            monthly = g.get("monthly_contribution")
+            try:
+                monthly = float(monthly) if monthly is not None else None
+            except (TypeError, ValueError):
+                monthly = None
+            goals.append(
+                {
+                    "name": name,
+                    "target_amount": target,
+                    "monthly_contribution": monthly,
+                }
+            )
+        return {"reply": reply, "goals_updated": True, "goals": goals}
 
 
 def build_reasoner(settings: Settings) -> Reasoner | None:

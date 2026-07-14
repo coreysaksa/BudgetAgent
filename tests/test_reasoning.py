@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import json
+
 from budget_agent.approval import MoneyAction
 from budget_agent.config import Settings
 from budget_agent.models import BudgetLine, BudgetPlan
@@ -87,3 +89,78 @@ def test_chat_without_snapshot_omits_snapshot_message():
 
     roles = [m["role"] for m in fake.calls[0]["messages"]]
     assert roles == ["system", "user"]
+
+
+def test_chat_and_plan_returns_updated_goals():
+    reply = json.dumps(
+        {
+            "reply": "Saving $500/mo reaches $10,000 in about 20 months.",
+            "goals_updated": True,
+            "goals": [
+                {"name": "Emergency fund", "target_amount": 10000,
+                 "monthly_contribution": 500}
+            ],
+        }
+    )
+    fake = _FakeChat(reply)
+    reasoner = Reasoner(fake, deployment="gpt-4o-mini")
+
+    out = reasoner.chat_and_plan(
+        "I want to save $10k for emergencies",
+        analysis={"by_category": []},
+        history=None,
+        current_goals=[],
+    )
+
+    assert out["goals_updated"] is True
+    assert out["goals"] == [
+        {"name": "Emergency fund", "target_amount": 10000.0,
+         "monthly_contribution": 500.0}
+    ]
+    # JSON mode is requested and current goals are provided as context.
+    call = fake.calls[0]
+    assert call["response_format"] == {"type": "json_object"}
+    assert "Current goals" in call["messages"][1]["content"]
+
+
+def test_chat_and_plan_leaves_goals_unchanged_for_questions():
+    current = [{"name": "Vacation", "target_amount": 3000, "monthly_contribution": 250}]
+    reply = json.dumps({"reply": "You spent most on food.", "goals_updated": False,
+                        "goals": current})
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    out = reasoner.chat_and_plan("Where can I cut back?", current_goals=current)
+
+    assert out["goals_updated"] is False
+    assert out["goals"] == current
+
+
+def test_chat_and_plan_handles_non_json_gracefully():
+    current = [{"name": "Vacation", "target_amount": 3000}]
+    reasoner = Reasoner(_FakeChat("oops not json"), deployment="gpt-4o-mini")
+
+    out = reasoner.chat_and_plan("hi", current_goals=current)
+
+    assert out["goals_updated"] is False
+    assert out["goals"] == current
+    assert out["reply"] == "oops not json"
+
+
+def test_chat_and_plan_drops_nameless_goals():
+    reply = json.dumps(
+        {
+            "reply": "ok",
+            "goals_updated": True,
+            "goals": [
+                {"name": "", "target_amount": 100},
+                {"name": "Car", "target_amount": "5000", "monthly_contribution": None},
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    out = reasoner.chat_and_plan("save for a car", current_goals=[])
+
+    assert out["goals"] == [
+        {"name": "Car", "target_amount": 5000.0, "monthly_contribution": None}
+    ]
