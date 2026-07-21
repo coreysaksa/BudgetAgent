@@ -153,7 +153,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             detail="Azure OpenAI is not configured (set AZURE_OPENAI_ENDPOINT).",
         )
     try:
-        analysis = _orchestrator().analyze()
+        analysis = _orchestrator().snapshot()
     except Exception:  # noqa: BLE001 - chat degrades gracefully without a snapshot
         analysis = {}
     history = [{"role": m.role, "content": m.content} for m in req.history]

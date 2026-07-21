@@ -20,6 +20,8 @@ def _build(policy=None):
                      "balance": 2000.0, "is_petty_cash": False},
                     {"id": "pc", "name": "Petty", "type": "checking",
                      "balance": 100.0, "is_petty_cash": True},
+                    {"id": "cc", "name": "Rewards Card", "type": "credit",
+                     "balance": -640.0, "apr": 19.99},
                 ],
             )
         return httpx.Response(
@@ -57,6 +59,22 @@ def _build(policy=None):
         planner=_client(PlannerClient, plan_handler),
         policy=policy or ApprovalPolicy(require_approval=True),
     )
+
+
+def test_snapshot_enriches_analysis_with_account_balances_and_apr():
+    orch = _build()
+    snap = orch.snapshot()
+
+    # Retains the analyzer output...
+    assert snap["total_inflow"] == 4000.0
+    # ...and adds a per-account summary the chat layer can ground on.
+    accounts = {a["name"]: a for a in snap["accounts"]}
+    assert accounts["Checking"]["balance"] == 2000.0
+    assert accounts["Checking"]["apr"] is None
+    card = accounts["Rewards Card"]
+    assert card["balance"] == -640.0
+    assert card["type"] == "credit"
+    assert card["apr"] == 19.99
 
 
 def test_recommend_is_read_only_and_proposes_topup():

@@ -58,6 +58,29 @@ class Orchestrator:
         txns = self.aggregator.get_transactions()
         return self.analyzer.analyze(accounts, txns)
 
+    def snapshot(self) -> dict[str, Any]:
+        """Spending analysis enriched with a per-account summary.
+
+        The analyzer output on its own omits account balances and interest
+        rates, so a conversational reply grounded only on it can't reason about
+        the user's actual cash, debt, or which balances cost the most. This adds
+        an ``accounts`` list (name, type, balance, apr) so the chat/plan layer
+        can factor real balances and APRs into its advice.
+        """
+        accounts = self.aggregator.get_accounts()
+        txns = self.aggregator.get_transactions()
+        analysis = dict(self.analyzer.analyze(accounts, txns))
+        analysis["accounts"] = [
+            {
+                "name": a.name,
+                "type": a.type.value,
+                "balance": a.balance,
+                "apr": a.apr,
+            }
+            for a in accounts
+        ]
+        return analysis
+
     def plan(self, analysis, goals: list[Goal]) -> BudgetPlan:
         """Build a budget from goals + analyzed spending."""
         return self.planner.build_plan(analysis, goals)

@@ -22,6 +22,9 @@ class Account(BaseModel):
     balance: float
     # The single checking account designated as discretionary "petty cash".
     is_petty_cash: bool = False
+    # Annual interest rate as a percentage (e.g. 19.99 for a 19.99% APR card).
+    # None when unknown; sourced from parsed statements / credit reports.
+    apr: float | None = None
 
 
 class Transaction(BaseModel):
