@@ -77,6 +77,15 @@ class Orchestrator:
                 "type": a.type.value,
                 "balance": a.balance,
                 "apr": a.apr,
+                "promos": [
+                    {
+                        "promo_type": p.promo_type,
+                        "apr": p.apr,
+                        "end_date": p.end_date.isoformat() if p.end_date else None,
+                        "balance": p.balance,
+                    }
+                    for p in a.promos
+                ],
             }
             for a in accounts
         ]

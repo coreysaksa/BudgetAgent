@@ -15,6 +15,21 @@ class AccountType(str, Enum):
     UTILITY = "utility"
 
 
+class Promo(BaseModel):
+    """A promotional / introductory / balance-transfer rate on a liability.
+
+    Sourced from a parsed statement so the chat/plan layer can prioritise
+    clearing the promotional balance at or before ``end_date``, when the rate
+    reverts to the account's standard APR.
+    """
+
+    promo_type: str = "other"
+    apr: float | None = None
+    end_date: date | None = None
+    balance: float | None = None
+    description: str | None = None
+
+
 class Account(BaseModel):
     id: str
     name: str
@@ -25,6 +40,9 @@ class Account(BaseModel):
     # Annual interest rate as a percentage (e.g. 19.99 for a 19.99% APR card).
     # None when unknown; sourced from parsed statements / credit reports.
     apr: float | None = None
+    # Promotional / introductory / balance-transfer rates on this account, each
+    # with its own rate, subject balance, and expiry date.
+    promos: list[Promo] = Field(default_factory=list)
 
 
 class Transaction(BaseModel):

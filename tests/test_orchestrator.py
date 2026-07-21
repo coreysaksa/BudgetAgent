@@ -21,7 +21,9 @@ def _build(policy=None):
                     {"id": "pc", "name": "Petty", "type": "checking",
                      "balance": 100.0, "is_petty_cash": True},
                     {"id": "cc", "name": "Rewards Card", "type": "credit",
-                     "balance": -640.0, "apr": 19.99},
+                     "balance": -640.0, "apr": 19.99,
+                     "promos": [{"promo_type": "balance_transfer", "apr": 0.0,
+                                 "end_date": "2026-12-01", "balance": 500.0}]},
                 ],
             )
         return httpx.Response(
@@ -75,6 +77,12 @@ def test_snapshot_enriches_analysis_with_account_balances_and_apr():
     assert card["balance"] == -640.0
     assert card["type"] == "credit"
     assert card["apr"] == 19.99
+    # Promotional rates flow through so the chat/plan layer can steer payoff.
+    assert card["promos"] == [
+        {"promo_type": "balance_transfer", "apr": 0.0,
+         "end_date": "2026-12-01", "balance": 500.0}
+    ]
+    assert accounts["Checking"]["promos"] == []
 
 
 def test_recommend_is_read_only_and_proposes_topup():
