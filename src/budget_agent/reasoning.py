@@ -44,27 +44,48 @@ _CHAT_SYSTEM_PROMPT = (
 
 _PLAN_SYSTEM_PROMPT = (
     "You are BudgetAI, a friendly, careful personal-finance assistant. The user manages "
-    "their savings goals by talking to you — this is the ONLY way their goals change.\n\n"
+    "their goals by talking to you — this is the ONLY way their goals change.\n\n"
     "You are given (as JSON) the user's current goals, and possibly a snapshot of their "
-    "spending analysis. The snapshot includes an `accounts` list (each with `name`, `type`, "
-    "`balance`, and `apr` — the annual interest rate as a percentage, or null), plus "
+    "spending analysis. The snapshot includes an `accounts` list (each with `id`, `name`, "
+    "`type`, `balance`, and `apr` — the annual interest rate as a percentage, or null), plus "
     "spending by category and income vs. outflow. Use real balances and APRs when shaping a "
     "plan: fund goals from available savings/checking balances, account for how much "
-    "high-APR debt is costing, and prefer paying down the highest-APR balances. Behave as "
-    "follows:\n"
+    "high-APR debt is costing, and prefer paying down the highest-APR balances.\n\n"
+    "GOALS CAN BE SIMPLE OR RICH. Each goal is an object with these fields (include only "
+    "what's relevant; omit or null the rest):\n"
+    "  - name: string (required)\n"
+    "  - kind: one of \"savings\" (grow a balance toward a target), \"debt_payoff\" (pay a "
+    "debt down to zero), or \"milestone\" (a dated event funded through sub-milestones). "
+    "Default \"savings\".\n"
+    "  - target_amount: number or null — how much to save, or the debt size to pay off.\n"
+    "  - target_date: \"YYYY-MM-DD\" or null — when they want it done by.\n"
+    "  - monthly_contribution: number or null — planned monthly amount. If they give a "
+    "target and date, estimate this; if they give a monthly amount, you may estimate the "
+    "target.\n"
+    "  - linked_account: string or null — for a savings goal, the NAME of the savings "
+    "account that holds the money for this goal (match a `name` from the snapshot accounts, "
+    "e.g. \"Travel Savings\"). Progress is then tracked from that account's real balance. "
+    "Leave null if no dedicated account.\n"
+    "  - target_accounts: array of account NAMES — for a debt_payoff goal, the card/loan "
+    "accounts being paid down (match `name`s from the snapshot). Empty means all credit "
+    "accounts. Debt goals are tracked from live balances, NOT a linked savings account.\n"
+    "  - milestones: array of {\"name\", \"amount\", \"due_date\" (\"YYYY-MM-DD\" or null), "
+    "\"payment_timing\" (\"upfront\" if paid in full on the date like airfare, or "
+    "\"at_checkout\" if not charged until later like hotels)} — for milestone goals, break "
+    "the goal into these dated pieces so their savings timelines can differ.\n"
+    "  - notes: string or null — any special context worth remembering.\n\n"
+    "Behave as follows:\n"
     "- When the user tells you about a goal to add, change, or remove, or asks you to plan "
     "for a goal: write a short, concrete plan in `reply` — reference real numbers from the "
-    "snapshot when possible and suggest a realistic monthly contribution and rough "
-    "timeline. Then set `goals_updated` to true and return in `goals` the COMPLETE updated "
-    "list of goals: keep every existing goal the user did NOT ask to change, apply their "
-    "additions and edits, and omit any goal they asked to remove.\n"
+    "snapshot, suggest a realistic monthly contribution and rough timeline, and for milestone "
+    "goals note how each milestone's timing affects when the money is needed. Then set "
+    "`goals_updated` to true and return in `goals` the COMPLETE updated list: keep every "
+    "existing goal the user did NOT ask to change AND RETURN EACH OF ITS FIELDS VERBATIM "
+    "(including id, linked_account, target_accounts, milestones), apply their additions and "
+    "edits, and omit any goal they asked to remove.\n"
     "- When the user is just asking a question and NOT changing goals, set `goals_updated` "
     "to false and return the current goals unchanged in `goals`.\n"
-    "- Never invent goals the user didn't ask for. Always pick sensible values: if the user "
-    "gives a target amount, estimate a monthly contribution; if they give a monthly amount, "
-    "you may leave target_amount at your best estimate or 0.\n\n"
-    "Each goal is an object: {\"name\": string, \"target_amount\": number, "
-    "\"monthly_contribution\": number or null}. "
+    "- Never invent goals the user didn't ask for. Preserve each existing goal's `id`.\n\n"
     "Respond with ONLY a compact JSON object of the form: "
     "{\"reply\": string, \"goals_updated\": boolean, \"goals\": [goal, ...]}. "
     "Do not wrap it in markdown or add any text outside the JSON."
@@ -76,6 +97,92 @@ class ChatClient(Protocol):
 
     @property
     def chat(self) -> Any: ...
+
+
+_MISSING = object()
+_GOAL_KINDS = {"savings", "debt_payoff", "milestone"}
+_PAYMENT_TIMINGS = {"upfront", "at_checkout"}
+
+
+def _norm_name(name: Any) -> str:
+    return " ".join(str(name or "").lower().split())
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_milestones(value: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return out
+    for m in value:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("name") or "").strip()
+        if not name:
+            continue
+        timing = str(m.get("payment_timing") or "upfront").strip().lower()
+        if timing not in _PAYMENT_TIMINGS:
+            timing = "upfront"
+        out.append(
+            {
+                "name": name,
+                "amount": _to_float(m.get("amount")) or 0.0,
+                "due_date": _to_str(m.get("due_date")),
+                "payment_timing": timing,
+                "funded_amount": _to_float(m.get("funded_amount")) or 0.0,
+            }
+        )
+    return out
+
+
+def _merge_goal(g: dict[str, Any], prior: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a model-returned goal, inheriting any field the model OMITTED
+    (key absent) from the matching prior goal so unchanged rich data isn't lost.
+    A field the model returns explicitly (even null/empty) is respected.
+    """
+
+    def pick(key: str, coerce, default):
+        raw = g.get(key, _MISSING)
+        if raw is _MISSING:
+            return prior.get(key, default)
+        return coerce(raw)
+
+    kind = pick("kind", lambda v: str(v or "savings").strip().lower(), "savings")
+    if kind not in _GOAL_KINDS:
+        kind = "savings"
+
+    return {
+        "id": _to_str(g.get("id")) or _to_str(prior.get("id")),
+        "name": str(g.get("name") or "").strip(),
+        "kind": kind,
+        "target_amount": pick("target_amount", _to_float, None),
+        "target_date": pick("target_date", _to_str, None),
+        "monthly_contribution": pick("monthly_contribution", _to_float, None),
+        "linked_account": pick("linked_account", _to_str, None),
+        "target_accounts": pick(
+            "target_accounts",
+            lambda v: [str(x).strip() for x in v if str(x).strip()]
+            if isinstance(v, list)
+            else [],
+            [],
+        ),
+        "milestones": pick("milestones", _parse_milestones, []),
+        "notes": pick("notes", _to_str, None),
+    }
 
 
 class Reasoner:
@@ -209,6 +316,13 @@ class Reasoner:
         if not goals_updated or not isinstance(goals_raw, list):
             return {"reply": reply, "goals_updated": False, "goals": current_goals}
 
+        # Index current goals by id and by normalized name so we can preserve ids
+        # and inherit any rich fields the model omitted from an unchanged goal.
+        by_id = {str(g.get("id")): g for g in current_goals if g.get("id")}
+        by_name = {
+            _norm_name(g.get("name")): g for g in current_goals if g.get("name")
+        }
+
         goals: list[dict[str, Any]] = []
         for g in goals_raw:
             if not isinstance(g, dict):
@@ -216,22 +330,8 @@ class Reasoner:
             name = str(g.get("name") or "").strip()
             if not name:
                 continue
-            try:
-                target = float(g.get("target_amount") or 0)
-            except (TypeError, ValueError):
-                target = 0.0
-            monthly = g.get("monthly_contribution")
-            try:
-                monthly = float(monthly) if monthly is not None else None
-            except (TypeError, ValueError):
-                monthly = None
-            goals.append(
-                {
-                    "name": name,
-                    "target_amount": target,
-                    "monthly_contribution": monthly,
-                }
-            )
+            prior = by_id.get(str(g.get("id"))) or by_name.get(_norm_name(name)) or {}
+            goals.append(_merge_goal(g, prior))
         return {"reply": reply, "goals_updated": True, "goals": goals}
 
 

@@ -114,8 +114,18 @@ def test_chat_and_plan_returns_updated_goals():
 
     assert out["goals_updated"] is True
     assert out["goals"] == [
-        {"name": "Emergency fund", "target_amount": 10000.0,
-         "monthly_contribution": 500.0}
+        {
+            "id": None,
+            "name": "Emergency fund",
+            "kind": "savings",
+            "target_amount": 10000.0,
+            "target_date": None,
+            "monthly_contribution": 500.0,
+            "linked_account": None,
+            "target_accounts": [],
+            "milestones": [],
+            "notes": None,
+        }
     ]
     # JSON mode is requested and current goals are provided as context.
     call = fake.calls[0]
@@ -162,5 +172,107 @@ def test_chat_and_plan_drops_nameless_goals():
     out = reasoner.chat_and_plan("save for a car", current_goals=[])
 
     assert out["goals"] == [
-        {"name": "Car", "target_amount": 5000.0, "monthly_contribution": None}
+        {
+            "id": None,
+            "name": "Car",
+            "kind": "savings",
+            "target_amount": 5000.0,
+            "target_date": None,
+            "monthly_contribution": None,
+            "linked_account": None,
+            "target_accounts": [],
+            "milestones": [],
+            "notes": None,
+        }
     ]
+
+
+def test_chat_and_plan_parses_rich_goal_fields():
+    reply = json.dumps(
+        {
+            "reply": "Booked the trip plan.",
+            "goals_updated": True,
+            "goals": [
+                {
+                    "id": "europe-trip",
+                    "name": "Europe wedding trip",
+                    "kind": "milestone",
+                    "target_amount": 6000,
+                    "target_date": "2027-06-01",
+                    "monthly_contribution": 500,
+                    "linked_account": "Travel Savings",
+                    "milestones": [
+                        {"name": "Airfare", "amount": 2000, "due_date": "2027-03-01",
+                         "payment_timing": "upfront"},
+                        {"name": "Hotels", "amount": 1500, "due_date": "2027-06-01",
+                         "payment_timing": "at_checkout"},
+                    ],
+                    "notes": "Cousin's wedding",
+                }
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    out = reasoner.chat_and_plan("plan my europe trip", current_goals=[])
+    g = out["goals"][0]
+    assert g["id"] == "europe-trip"
+    assert g["kind"] == "milestone"
+    assert g["target_date"] == "2027-06-01"
+    assert g["linked_account"] == "Travel Savings"
+    assert g["milestones"] == [
+        {"name": "Airfare", "amount": 2000.0, "due_date": "2027-03-01",
+         "payment_timing": "upfront", "funded_amount": 0.0},
+        {"name": "Hotels", "amount": 1500.0, "due_date": "2027-06-01",
+         "payment_timing": "at_checkout", "funded_amount": 0.0},
+    ]
+
+
+def test_chat_and_plan_inherits_omitted_fields_from_prior_goal():
+    # The model edits one field of an existing goal but omits the milestones /
+    # linked account; those must be inherited so rich data isn't lost.
+    current = [
+        {
+            "id": "europe-trip",
+            "name": "Europe wedding trip",
+            "kind": "milestone",
+            "target_amount": 6000.0,
+            "linked_account": "Travel Savings",
+            "milestones": [{"name": "Airfare", "amount": 2000.0}],
+        }
+    ]
+    reply = json.dumps(
+        {
+            "reply": "Bumped your monthly contribution.",
+            "goals_updated": True,
+            "goals": [
+                {"id": "europe-trip", "name": "Europe wedding trip",
+                 "monthly_contribution": 600}
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    g = reasoner.chat_and_plan("save more", current_goals=current)["goals"][0]
+    assert g["monthly_contribution"] == 600.0
+    assert g["linked_account"] == "Travel Savings"  # inherited
+    assert g["milestones"] == [{"name": "Airfare", "amount": 2000.0}]  # inherited
+    assert g["kind"] == "milestone"  # inherited
+
+
+def test_chat_and_plan_debt_payoff_target_accounts():
+    reply = json.dumps(
+        {
+            "reply": "Focus on the highest-APR card first.",
+            "goals_updated": True,
+            "goals": [
+                {"name": "Pay off cards", "kind": "debt_payoff", "target_amount": 8000,
+                 "target_accounts": ["Big Bank Visa", "Store Card"]}
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    g = reasoner.chat_and_plan("pay off my cards", current_goals=[])["goals"][0]
+    assert g["kind"] == "debt_payoff"
+    assert g["target_accounts"] == ["Big Bank Visa", "Store Card"]

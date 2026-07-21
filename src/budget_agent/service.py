@@ -124,10 +124,28 @@ class ChatMessage(BaseModel):
     content: str
 
 
-class ChatGoal(BaseModel):
+class ChatMilestone(BaseModel):
     name: str
-    target_amount: float = 0.0
+    amount: float = 0.0
+    due_date: str | None = None
+    payment_timing: str = "upfront"
+    funded_amount: float = 0.0
+
+
+class ChatGoal(BaseModel):
+    # Mirrors the persisted goal shape so rich fields survive a chat round-trip
+    # (the model echoes the full goal set on every turn). Extra/unknown fields
+    # are ignored; every field is optional so simple goals still validate.
+    id: str | None = None
+    name: str
+    kind: str = "savings"
+    target_amount: float | None = None
+    target_date: str | None = None
     monthly_contribution: float | None = None
+    linked_account: str | None = None
+    target_accounts: list[str] = []
+    milestones: list[ChatMilestone] = []
+    notes: str | None = None
 
 
 class ChatRequest(BaseModel):

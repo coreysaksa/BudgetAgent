@@ -72,6 +72,7 @@ class Orchestrator:
         analysis = dict(self.analyzer.analyze(accounts, txns))
         analysis["accounts"] = [
             {
+                "id": a.id,
                 "name": a.name,
                 "type": a.type.value,
                 "balance": a.balance,
