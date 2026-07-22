@@ -185,6 +185,12 @@ def chat(req: ChatRequest) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 - never let payoff math break the chat
             payoff = None
         if payoff is not None:
+            # Bound the prompt: the month-by-month table can be long for an
+            # under-funded plan. Keep the summary (cards/warnings/totals) intact
+            # but trim the schedule for the chat; /payoff returns the full table.
+            sched = payoff.get("schedule") or []
+            if len(sched) > 24:
+                payoff = {**payoff, "schedule": sched[:24], "schedule_truncated": True}
             analysis["debt_payoff_plan"] = payoff
     return _guard(
         lambda: reasoner.chat_and_plan(req.message, analysis, history, current_goals)
