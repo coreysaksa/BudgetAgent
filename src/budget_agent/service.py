@@ -19,6 +19,7 @@ from .config import Settings
 from .models import BudgetPlan, Goal
 from .notifications import Notifier
 from .orchestrator import Orchestrator
+from .payoff import payoff_from_snapshot
 from .reasoning import build_reasoner
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
@@ -176,9 +177,44 @@ def chat(req: ChatRequest) -> dict[str, Any]:
         analysis = {}
     history = [{"role": m.role, "content": m.content} for m in req.history]
     current_goals = [g.model_dump() for g in req.goals]
+    # Attach a deterministic, promo-aware credit-card payoff schedule so the model
+    # presents an exact month-by-month plan instead of estimating the math itself.
+    if analysis:
+        try:
+            payoff = payoff_from_snapshot(analysis, current_goals)
+        except Exception:  # noqa: BLE001 - never let payoff math break the chat
+            payoff = None
+        if payoff is not None:
+            analysis["debt_payoff_plan"] = payoff
     return _guard(
         lambda: reasoner.chat_and_plan(req.message, analysis, history, current_goals)
     )
+
+
+class PayoffRequest(BaseModel):
+    # Optional total dollars/month for cards; defaults to the derived surplus.
+    monthly_budget: float | None = None
+    goals: list[ChatGoal] = []
+
+
+@app.post("/payoff")
+def payoff(req: PayoffRequest) -> dict[str, Any]:
+    """Deterministic month-by-month credit-card payoff schedule.
+
+    Uses live account balances/APRs/promos plus the user's ``debt_payoff`` goals
+    (per-card target dates and milestones). Read-only — never moves money.
+    """
+    try:
+        analysis = _orchestrator().snapshot()
+    except Exception:  # noqa: BLE001
+        analysis = {}
+    goals = [g.model_dump() for g in req.goals]
+    plan = _guard(
+        lambda: payoff_from_snapshot(analysis, goals, req.monthly_budget)
+    )
+    if plan is None:
+        return {"has_debt": False, "plan": None}
+    return {"has_debt": True, "plan": plan}
 
 
 class RecommendRequest(BaseModel):
