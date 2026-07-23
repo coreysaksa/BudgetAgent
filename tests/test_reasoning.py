@@ -276,3 +276,86 @@ def test_chat_and_plan_debt_payoff_target_accounts():
     g = reasoner.chat_and_plan("pay off my cards", current_goals=[])["goals"][0]
     assert g["kind"] == "debt_payoff"
     assert g["target_accounts"] == ["Big Bank Visa", "Store Card"]
+
+
+def test_chat_and_plan_proposes_category_rule_for_known_leaf():
+    reply = json.dumps(
+        {
+            "reply": "I'll tag Netflix as streaming once you approve.",
+            "goals_updated": False,
+            "goals": [],
+            "category_rules_proposed": [
+                {"field": "merchant", "pattern": "netflix", "subcategory": "streaming"}
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    out = reasoner.chat_and_plan("categorize netflix as streaming", current_goals=[])
+    assert out["goals_updated"] is False
+    assert out["category_rules_proposed"] == [
+        {"field": "merchant", "pattern": "netflix", "subcategory": "streaming"}
+    ]
+
+
+def test_chat_and_plan_proposes_custom_category_with_placement():
+    reply = json.dumps(
+        {
+            "reply": "New 'Takeout' subcategory proposed.",
+            "goals_updated": False,
+            "goals": [],
+            "category_rules_proposed": [
+                {
+                    "field": "description",
+                    "pattern": "doordash",
+                    "subcategory": "takeout",
+                    "bucket": "DISCRETIONARY",
+                    "category": "Dining",
+                    "label": "Takeout",
+                }
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    rule = reasoner.chat_and_plan("put doordash under takeout", current_goals=[])[
+        "category_rules_proposed"
+    ][0]
+    assert rule == {
+        "field": "description",
+        "pattern": "doordash",
+        "subcategory": "takeout",
+        "bucket": "discretionary",
+        "category": "dining",
+        "label": "Takeout",
+    }
+
+
+def test_chat_and_plan_drops_invalid_category_rules():
+    reply = json.dumps(
+        {
+            "reply": "ok",
+            "goals_updated": False,
+            "goals": [],
+            "category_rules_proposed": [
+                {"pattern": "", "subcategory": "streaming"},
+                {"pattern": "hulu", "subcategory": ""},
+                "not-a-dict",
+                {"pattern": "hbo", "subcategory": "streaming", "field": "bogus"},
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    rules = reasoner.chat_and_plan("x", current_goals=[])["category_rules_proposed"]
+    # Only the last (valid) rule survives; bad field falls back to "merchant".
+    assert rules == [
+        {"field": "merchant", "pattern": "hbo", "subcategory": "streaming"}
+    ]
+
+
+def test_chat_and_plan_non_json_includes_empty_category_rules():
+    out = Reasoner(_FakeChat("plain text"), deployment="d").chat_and_plan(
+        "hi", current_goals=[]
+    )
+    assert out["category_rules_proposed"] == []

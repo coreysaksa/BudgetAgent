@@ -126,8 +126,25 @@ _PLAN_SYSTEM_PROMPT = (
     "- When the user is just asking a question and NOT changing goals, set `goals_updated` "
     "to false and return the current goals unchanged in `goals`.\n"
     "- Never invent goals the user didn't ask for. Preserve each existing goal's `id`.\n\n"
+    "CATEGORIZATION: the user can ask you to (re)categorize spending or create a new "
+    "spending category/subcategory — e.g. \"count SYNCB/Sleep Number as furniture\" or "
+    "\"put all my DoorDash under a new 'Takeout' category\". When they do, propose one or "
+    "more rules in `category_rules_proposed`; NEVER apply them silently — they take effect "
+    "only after the user approves them in the UI. Each proposed rule is an object: "
+    "{\"field\": \"merchant\"|\"description\" (which text to match), \"pattern\": the "
+    "case-insensitive substring to match (e.g. \"sleep number\"), \"subcategory\": the leaf "
+    "to assign (snake_case, existing or new), and — ONLY when the subcategory is a brand-new "
+    "leaf — \"bucket\": \"mandatory\"|\"discretionary\" and \"category\": the mid-level group "
+    "it belongs under (e.g. \"shopping\", \"dining\", \"utilities\"), plus an optional "
+    "human-friendly \"label\"}. Existing buckets are `mandatory` (debt + essentials: housing, "
+    "utilities, groceries, insurance, healthcare, transport) and `discretionary` (dining, "
+    "entertainment, shopping, travel, other). In `reply`, briefly explain what you're "
+    "proposing and that it needs their approval, and that approved rules apply retroactively "
+    "to all matching transactions. When not changing categories, omit `category_rules_proposed` "
+    "or return it empty.\n\n"
     "Respond with ONLY a compact JSON object of the form: "
-    "{\"reply\": string, \"goals_updated\": boolean, \"goals\": [goal, ...]}. "
+    "{\"reply\": string, \"goals_updated\": boolean, \"goals\": [goal, ...], "
+    "\"category_rules_proposed\": [rule, ...]}. "
     "Do not wrap it in markdown or add any text outside the JSON."
 )
 
@@ -340,6 +357,36 @@ class Reasoner:
         return self._parse_plan_response(raw, current_goals)
 
     @staticmethod
+    def _parse_category_rules(value: Any) -> list[dict[str, Any]]:
+        """Validate the model's proposed categorization rules (never auto-applied)."""
+        if not isinstance(value, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            pattern = str(item.get("pattern") or "").strip()
+            subcategory = str(item.get("subcategory") or "").strip()
+            if not pattern or not subcategory:
+                continue
+            field = str(item.get("field") or "merchant").strip().lower()
+            if field not in ("merchant", "description"):
+                field = "merchant"
+            rule: dict[str, Any] = {
+                "field": field,
+                "pattern": pattern,
+                "subcategory": subcategory,
+            }
+            bucket = str(item.get("bucket") or "").strip().lower()
+            category = str(item.get("category") or "").strip().lower()
+            if bucket in ("mandatory", "discretionary") and category:
+                rule["bucket"] = bucket
+                rule["category"] = category
+                rule["label"] = str(item.get("label") or "").strip() or None
+            out.append(rule)
+        return out
+
+    @staticmethod
     def _parse_plan_response(
         raw: str, current_goals: list[dict[str, Any]]
     ) -> dict[str, Any]:
@@ -348,13 +395,26 @@ class Reasoner:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             # Fall back to treating the whole text as a plain reply, changing nothing.
-            return {"reply": raw, "goals_updated": False, "goals": current_goals}
+            return {
+                "reply": raw,
+                "goals_updated": False,
+                "goals": current_goals,
+                "category_rules_proposed": [],
+            }
 
         reply = str(data.get("reply") or "")
+        category_rules = Reasoner._parse_category_rules(
+            data.get("category_rules_proposed")
+        )
         goals_updated = bool(data.get("goals_updated"))
         goals_raw = data.get("goals")
         if not goals_updated or not isinstance(goals_raw, list):
-            return {"reply": reply, "goals_updated": False, "goals": current_goals}
+            return {
+                "reply": reply,
+                "goals_updated": False,
+                "goals": current_goals,
+                "category_rules_proposed": category_rules,
+            }
 
         # Index current goals by id and by normalized name so we can preserve ids
         # and inherit any rich fields the model omitted from an unchanged goal.
@@ -372,7 +432,12 @@ class Reasoner:
                 continue
             prior = by_id.get(str(g.get("id"))) or by_name.get(_norm_name(name)) or {}
             goals.append(_merge_goal(g, prior))
-        return {"reply": reply, "goals_updated": True, "goals": goals}
+        return {
+            "reply": reply,
+            "goals_updated": True,
+            "goals": goals,
+            "category_rules_proposed": category_rules,
+        }
 
 
 def build_reasoner(settings: Settings) -> Reasoner | None:
