@@ -155,6 +155,25 @@ class ChatRequest(BaseModel):
     goals: list[ChatGoal] = []
 
 
+def _trim_spending_tree(analysis: dict[str, Any], max_txns_per_sub: int = 8) -> None:
+    """Cap the per-subcategory transaction lists so the chat prompt stays bounded.
+
+    The analyzer embeds every transaction in ``spending_tree`` for the drill-down
+    UI; the chat only needs the bucket/category/subcategory totals plus a few
+    example transactions to spot savings, so keep the largest handful per leaf.
+    """
+    tree = analysis.get("spending_tree")
+    if not isinstance(tree, list):
+        return
+    for bucket in tree:
+        for category in bucket.get("categories", []):
+            for sub in category.get("subcategories", []):
+                txns = sub.get("transactions") or []
+                if len(txns) > max_txns_per_sub:
+                    sub["transactions"] = txns[:max_txns_per_sub]
+                    sub["transactions_truncated"] = len(txns)
+
+
 @app.post("/chat")
 def chat(req: ChatRequest) -> dict[str, Any]:
     """Conversational finance chat that can also build a plan and manage the
@@ -175,6 +194,8 @@ def chat(req: ChatRequest) -> dict[str, Any]:
         analysis = _orchestrator().snapshot()
     except Exception:  # noqa: BLE001 - chat degrades gracefully without a snapshot
         analysis = {}
+    if analysis:
+        _trim_spending_tree(analysis)
     history = [{"role": m.role, "content": m.content} for m in req.history]
     current_goals = [g.model_dump() for g in req.goals]
     # Attach a deterministic, promo-aware credit-card payoff schedule so the model
