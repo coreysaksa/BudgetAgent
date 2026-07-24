@@ -58,7 +58,7 @@ class Orchestrator:
         txns = self.aggregator.get_transactions()
         return self.analyzer.analyze(accounts, txns)
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, days: int = 30) -> dict[str, Any]:
         """Spending analysis enriched with a per-account summary.
 
         The analyzer output on its own omits account balances and interest
@@ -66,10 +66,14 @@ class Orchestrator:
         the user's actual cash, debt, or which balances cost the most. This adds
         an ``accounts`` list (name, type, balance, apr) so the chat/plan layer
         can factor real balances and APRs into its advice.
+
+        ``days`` bounds the transaction window (and the analyzer's spending
+        period) so the caller can widen it when the user asks to look further
+        back; it defaults to 30 days.
         """
         accounts = self.aggregator.get_accounts()
-        txns = self.aggregator.get_transactions()
-        analysis = dict(self.analyzer.analyze(accounts, txns))
+        txns = self.aggregator.get_transactions(days=days)
+        analysis = dict(self.analyzer.analyze(accounts, txns, period_days=days))
         analysis["accounts"] = [
             {
                 "id": a.id,

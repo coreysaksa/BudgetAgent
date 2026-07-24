@@ -7,6 +7,7 @@ live money-movement integration remains deferred (high risk). See approval.py.
 """
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Any, Callable
 
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 
 from .approval import ApprovalPolicy, MoneyAction
 from .config import Settings
+from .lookback import parse_lookback_days
 from .models import BudgetPlan, Goal
 from .notifications import Notifier
 from .orchestrator import Orchestrator
@@ -24,6 +26,8 @@ from .reasoning import build_reasoner
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
 app = FastAPI(title="budget-agent")
+
+_log = logging.getLogger(__name__)
 
 
 @lru_cache
@@ -190,12 +194,30 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             status_code=503,
             detail="Azure OpenAI is not configured (set AZURE_OPENAI_ENDPOINT).",
         )
+    # Let the user widen the window conversationally ("looking back 60 days",
+    # "past 6 months"); default to 30 days when they don't ask.
+    lookback_days = parse_lookback_days(req.message)
     try:
-        analysis = _orchestrator().snapshot()
-    except Exception:  # noqa: BLE001 - chat degrades gracefully without a snapshot
+        analysis = _orchestrator().snapshot(days=lookback_days)
+        data_status: dict[str, Any] = {"ok": True, "lookback_days": lookback_days}
+    except Exception as exc:  # noqa: BLE001 - chat degrades gracefully without a snapshot
+        # Don't swallow this silently: an aggregator/analyzer outage would
+        # otherwise look identical to "no accounts connected" to the model.
+        _log.warning(
+            "chat snapshot failed (lookback=%sd): %s",
+            lookback_days,
+            exc,
+            exc_info=True,
+        )
         analysis = {}
+        data_status = {
+            "ok": False,
+            "lookback_days": lookback_days,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     if analysis:
         _trim_spending_tree(analysis)
+        analysis["lookback_days"] = lookback_days
     history = [{"role": m.role, "content": m.content} for m in req.history]
     current_goals = [g.model_dump() for g in req.goals]
     # Attach a deterministic, promo-aware credit-card payoff schedule so the model
@@ -213,6 +235,10 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             if len(sched) > 24:
                 payoff = {**payoff, "schedule": sched[:24], "schedule_truncated": True}
             analysis["debt_payoff_plan"] = payoff
+    # Always surface how the data load went so the model can distinguish a
+    # temporary fetch failure from a genuinely empty account set.
+    analysis = analysis or {}
+    analysis["data_status"] = data_status
     return _guard(
         lambda: reasoner.chat_and_plan(req.message, analysis, history, current_goals)
     )

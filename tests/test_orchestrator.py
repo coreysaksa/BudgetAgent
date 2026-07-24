@@ -85,6 +85,33 @@ def test_snapshot_enriches_analysis_with_account_balances_and_apr():
     assert accounts["Checking"]["promos"] == []
 
 
+def test_snapshot_threads_days_to_transactions_and_analyzer():
+    import json as _json
+
+    captured: dict[str, str | int | None] = {}
+
+    def agg_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts":
+            return httpx.Response(200, json=[])
+        captured["txn_days"] = request.url.params.get("days")
+        return httpx.Response(200, json=[])
+
+    def ana_handler(request: httpx.Request) -> httpx.Response:
+        captured["period_days"] = _json.loads(request.content)["period_days"]
+        return httpx.Response(200, json={"total_inflow": 0.0})
+
+    orch = Orchestrator(
+        aggregator=_client(AggregatorClient, agg_handler),
+        analyzer=_client(AnalyzerClient, ana_handler),
+        planner=_client(PlannerClient, lambda r: httpx.Response(200, json={})),
+        policy=ApprovalPolicy(require_approval=True),
+    )
+    orch.snapshot(days=90)
+
+    assert captured["txn_days"] == "90"
+    assert captured["period_days"] == 90
+
+
 def test_recommend_is_read_only_and_proposes_topup():
     orch = _build()
     goals = [Goal(id="g1", name="Vacation", target_amount=1000.0)]
