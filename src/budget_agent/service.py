@@ -247,6 +247,9 @@ def chat(req: ChatRequest) -> dict[str, Any]:
 class PayoffRequest(BaseModel):
     # Optional total dollars/month for cards; defaults to the derived surplus.
     monthly_budget: float | None = None
+    # Optional monthly essentials set-aside (food/gas/tolls) override; when null
+    # it's auto-derived from recent spending.
+    reserve: float | None = None
     goals: list[ChatGoal] = []
 
 
@@ -256,18 +259,44 @@ def payoff(req: PayoffRequest) -> dict[str, Any]:
 
     Uses live account balances/APRs/promos plus the user's ``debt_payoff`` goals
     (per-card target dates and milestones). Read-only — never moves money.
+
+    Returns ``configured`` (whether the user has set up a ``debt_payoff`` goal —
+    the dashboard only shows the plan when they have), ``data_ok`` (whether the
+    account snapshot loaded — so the UI can distinguish "still loading" from
+    "no debt"), ``has_debt``, and the ``plan``.
     """
+    goals = [g.model_dump() for g in req.goals]
+    configured = any(str(g.get("kind")) == "debt_payoff" for g in goals)
     try:
         analysis = _orchestrator().snapshot()
-    except Exception:  # noqa: BLE001
+        data_ok = True
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("payoff snapshot failed: %s", exc, exc_info=True)
         analysis = {}
-    goals = [g.model_dump() for g in req.goals]
+        data_ok = False
+
+    if not data_ok:
+        # Don't fabricate a "no debt" answer from an empty snapshot.
+        return {
+            "configured": configured,
+            "data_ok": False,
+            "has_debt": False,
+            "plan": None,
+        }
+
     plan = _guard(
-        lambda: payoff_from_snapshot(analysis, goals, req.monthly_budget)
+        lambda: payoff_from_snapshot(
+            analysis, goals, req.monthly_budget, reserve=req.reserve
+        )
     )
     if plan is None:
-        return {"has_debt": False, "plan": None}
-    return {"has_debt": True, "plan": plan}
+        return {
+            "configured": configured,
+            "data_ok": True,
+            "has_debt": False,
+            "plan": None,
+        }
+    return {"configured": configured, "data_ok": True, "has_debt": True, "plan": plan}
 
 
 class RecommendRequest(BaseModel):

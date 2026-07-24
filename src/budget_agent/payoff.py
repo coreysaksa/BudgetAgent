@@ -401,19 +401,55 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
+# Everyday variable-living leaves the payoff should hold money back for before
+# throwing the rest of the surplus at debt — "food, gas, tolls" and the like.
+# Keyed by the analyzer's leaf subcategory names (see analyzer/categorize.py).
+_RESERVE_LEAVES = {"groceries", "fuel", "transit", "dining", "coffee", "delivery"}
+
+
+def essentials_reserve(analysis: dict[str, Any]) -> tuple[float, dict[str, float]]:
+    """Estimate a reasonable *monthly* set-aside for everyday essentials.
+
+    Sums recent spend on food (groceries + eating out), gas (fuel) and tolls/
+    transit from the analyzer's ``spending_tree``, normalised to a monthly figure
+    using the analysis window. Returns ``(monthly_total, breakdown_by_leaf)``.
+
+    This is what the payoff "skill" reserves so a strict debt schedule doesn't
+    assume every spare dollar can go to cards — the user still has to eat and
+    commute. It is a suggested default the user can override.
+    """
+    tree = analysis.get("spending_tree") or []
+    breakdown: dict[str, float] = {}
+    for bucket in tree:
+        for cat in bucket.get("categories", []):
+            for sub in cat.get("subcategories", []):
+                leaf = str(sub.get("subcategory") or "")
+                if leaf in _RESERVE_LEAVES:
+                    breakdown[leaf] = breakdown.get(leaf, 0.0) + abs(
+                        float(sub.get("total") or 0.0)
+                    )
+    days = float(analysis.get("period_days") or analysis.get("lookback_days") or 30) or 30
+    scale = 30.0 / days
+    breakdown = {k: round(v * scale, 2) for k, v in breakdown.items()}
+    return round(sum(breakdown.values()), 2), breakdown
+
+
 def payoff_from_snapshot(
     analysis: dict[str, Any],
     goals: list[dict[str, Any]] | None = None,
     monthly_budget: float | None = None,
     start: date | None = None,
+    reserve: float | None = None,
 ) -> dict[str, Any] | None:
     """Build a debt-payoff schedule from a chat snapshot and the user's goals.
 
     The monthly budget defaults to the surplus (income − spending) minus the
-    monthly contributions already earmarked for non-debt goals; pass
-    ``monthly_budget`` to override. Per-card deadlines come from ``debt_payoff``
-    goals (their ``target_date`` and any milestone ``due_date`` naming a card) as
-    well as promo end dates. Returns ``None`` when there are no credit-card debts.
+    monthly contributions already earmarked for non-debt goals **and an essentials
+    reserve** (food/gas/tolls — see ``essentials_reserve``); pass ``monthly_budget``
+    to override the whole amount, or ``reserve`` to override just the set-aside.
+    Per-card deadlines come from ``debt_payoff`` goals (their ``target_date`` and
+    any milestone ``due_date`` naming a card) as well as promo end dates. Returns
+    ``None`` when there are no credit-card debts.
     """
     accounts = analysis.get("accounts") or []
     goals = goals or []
@@ -453,6 +489,13 @@ def payoff_from_snapshot(
     if not cards:
         return None
 
+    # Reserve a reasonable monthly set-aside for everyday essentials before any
+    # surplus is committed to cards. Auto-derived from recent spend unless the
+    # caller passes an explicit override.
+    auto_reserve, reserve_breakdown = essentials_reserve(analysis)
+    reserve_auto = reserve is None
+    reserve_amount = auto_reserve if reserve is None else max(0.0, float(reserve))
+
     derived = monthly_budget is None
     if monthly_budget is None:
         surplus = float(analysis.get("total_inflow") or 0.0) - float(
@@ -463,9 +506,13 @@ def payoff_from_snapshot(
             for g in goals
             if str(g.get("kind")) != "debt_payoff"
         )
-        monthly_budget = max(0.0, surplus - earmarked)
+        monthly_budget = max(0.0, surplus - earmarked - reserve_amount)
 
     plan = build_payoff_plan(cards, monthly_budget=monthly_budget, start=start)
     plan["derived_budget"] = derived
     plan["scope"] = "goal_cards" if has_debt_goal and only_ids else "all_cards"
+    plan["has_debt_goal"] = has_debt_goal
+    plan["essentials_reserve"] = reserve_amount
+    plan["essentials_reserve_auto"] = reserve_auto
+    plan["essentials_reserve_breakdown"] = reserve_breakdown
     return plan

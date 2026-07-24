@@ -5,6 +5,7 @@ from budget_agent.payoff import (
     Promo,
     build_payoff_plan,
     cards_from_accounts,
+    essentials_reserve,
     payoff_from_snapshot,
 )
 
@@ -173,3 +174,77 @@ def test_payoff_budget_override_beats_surplus():
     # No debt goals -> all credit cards are in scope.
     assert plan["scope"] == "all_cards"
     assert {c["id"] for c in plan["cards"]} == {"chase", "boa"}
+
+
+def _snapshot_with_essentials():
+    # A 60-day window whose essentials spend halves to a monthly figure.
+    snap = _snapshot()
+    snap["period_days"] = 60
+    snap["spending_tree"] = [
+        {
+            "bucket": "mandatory",
+            "categories": [
+                {
+                    "category": "groceries",
+                    "subcategories": [{"subcategory": "groceries", "total": 800.0}],
+                },
+                {
+                    "category": "transport",
+                    "subcategories": [
+                        {"subcategory": "fuel", "total": 400.0},
+                        {"subcategory": "transit", "total": 100.0},
+                    ],
+                },
+            ],
+        },
+        {
+            "bucket": "discretionary",
+            "categories": [
+                {
+                    "category": "dining",
+                    "subcategories": [
+                        {"subcategory": "dining", "total": 300.0},
+                        {"subcategory": "video_games", "total": 500.0},
+                    ],
+                }
+            ],
+        },
+    ]
+    return snap
+
+
+def test_essentials_reserve_normalizes_to_monthly():
+    total, breakdown = essentials_reserve(_snapshot_with_essentials())
+    # 60-day spend halved: groceries 400, fuel 200, transit 50, dining 150 = 800.
+    assert breakdown == {"groceries": 400.0, "fuel": 200.0, "transit": 50.0, "dining": 150.0}
+    assert total == 800.0
+    # Non-essential leaves (video_games) are not reserved.
+    assert "video_games" not in breakdown
+
+
+def test_payoff_reserves_essentials_before_surplus():
+    plan = payoff_from_snapshot(_snapshot_with_essentials(), [], start=START)
+    assert plan is not None
+    # Surplus 2400 − auto reserve 800 = 1600 to cards.
+    assert plan["essentials_reserve"] == 800.0
+    assert plan["essentials_reserve_auto"] is True
+    assert plan["monthly_budget"] == 1600.0
+    assert plan["essentials_reserve_breakdown"]["groceries"] == 400.0
+
+
+def test_payoff_reserve_override():
+    plan = payoff_from_snapshot(_snapshot_with_essentials(), [], reserve=300.0, start=START)
+    assert plan is not None
+    # Explicit reserve overrides the auto figure: 2400 − 300 = 2100.
+    assert plan["essentials_reserve"] == 300.0
+    assert plan["essentials_reserve_auto"] is False
+    assert plan["monthly_budget"] == 2100.0
+
+
+def test_payoff_has_debt_goal_flag():
+    goals = [{"kind": "debt_payoff", "name": "Cards", "target_accounts": ["Chase", "BoA"]}]
+    with_goal = payoff_from_snapshot(_snapshot(), goals, start=START)
+    without = payoff_from_snapshot(_snapshot(), [], start=START)
+    assert with_goal is not None and without is not None
+    assert with_goal["has_debt_goal"] is True
+    assert without["has_debt_goal"] is False
