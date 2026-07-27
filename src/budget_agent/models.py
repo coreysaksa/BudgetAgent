@@ -12,6 +12,7 @@ class AccountType(str, Enum):
     SAVINGS = "savings"
     CREDIT = "credit"
     MORTGAGE = "mortgage"
+    LOAN = "loan"
     UTILITY = "utility"
 
 

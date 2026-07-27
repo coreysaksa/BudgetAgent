@@ -26,6 +26,23 @@ def test_aggregator_get_accounts():
     assert accounts[0].is_petty_cash is True
 
 
+def test_aggregator_accepts_loan_account_type():
+    # The aggregator can emit a "loan" account type; the agent must accept it
+    # instead of raising a ValidationError when analyzing spending.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"id": "ln1", "name": "Auto loan", "type": "loan",
+                 "balance": -18000.0, "apr": 6.9, "source": "credit_report"},
+            ],
+        )
+
+    client = AggregatorClient("http://agg", transport=_transport(handler))
+    accounts = client.get_accounts()
+    assert accounts[0].type.value == "loan"
+
+
 def test_aggregator_get_transactions_passes_days():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/transactions"
