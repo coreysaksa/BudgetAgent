@@ -335,5 +335,9 @@ def build_reasoner(settings: Settings) -> Reasoner | None:
         azure_endpoint=settings.azure_openai_endpoint,
         azure_ad_token_provider=token_provider,
         api_version=settings.azure_openai_api_version,
+        # The deployment has a modest TPM budget, so brief bursts can hit 429s.
+        # Let the SDK retry with exponential backoff (honoring Retry-After)
+        # before we surface a rate-limit error to the caller.
+        max_retries=6,
     )
     return Reasoner(client, settings.azure_openai_deployment)

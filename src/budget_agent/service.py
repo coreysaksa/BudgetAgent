@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from openai import APIError, APIStatusError, RateLimitError
 from pydantic import BaseModel
 
 from .approval import ApprovalPolicy, MoneyAction
@@ -58,6 +59,27 @@ def _guard(fn: Callable[[], Any]) -> Any:
         raise HTTPException(
             status_code=501,
             detail="This capability is not implemented yet (M5).",
+        ) from exc
+    except RateLimitError as exc:
+        # The Azure OpenAI deployment is briefly over its token/request rate limit
+        # (the SDK already retried with backoff). Surface a clear, retryable 429
+        # instead of an opaque 500 so the UI can tell the user to try again.
+        _log.warning("assistant rate-limited: %s", exc)
+        raise HTTPException(
+            status_code=429,
+            detail="The assistant is busy right now — please try again in a few seconds.",
+        ) from exc
+    except APIStatusError as exc:
+        _log.warning("assistant returned %s: %s", exc.status_code, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"The assistant service returned an error ({exc.status_code}).",
+        ) from exc
+    except APIError as exc:
+        _log.warning("assistant transport error: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Couldn't reach the assistant service — please try again.",
         ) from exc
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
