@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from .approval import ApprovalPolicy, MoneyAction
 from .config import Settings
-from .lookback import parse_lookback_days
+from .lookback import resolve_lookback_days
 from .models import BudgetPlan, Goal
 from .notifications import Notifier
 from .orchestrator import Orchestrator
@@ -217,8 +217,10 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             detail="Azure OpenAI is not configured (set AZURE_OPENAI_ENDPOINT).",
         )
     # Let the user widen the window conversationally ("looking back 60 days",
-    # "past 6 months"); default to 30 days when they don't ask.
-    lookback_days = parse_lookback_days(req.message)
+    # "past 6 months", "last quarter"); default to 30 days when they don't ask.
+    # The window is sticky across turns: a follow-up that doesn't restate the
+    # window keeps the last one the user named instead of snapping back to 30.
+    lookback_days = resolve_lookback_days(req.message, req.history)
     try:
         analysis = _orchestrator().snapshot(days=lookback_days)
         data_status: dict[str, Any] = {"ok": True, "lookback_days": lookback_days}

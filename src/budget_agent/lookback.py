@@ -9,6 +9,8 @@ snapshot call is predictable and testable.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from typing import Any
 
 DEFAULT_LOOKBACK_DAYS = 30
 #: Upper bound so a stray "10 years" can't blow up the snapshot / prompt size.
@@ -31,10 +33,10 @@ _WORD_NUMBERS = {
 
 #: Approximate days per unit (calendar months/years are normalised to keep the
 #: window arithmetic simple and stable across runs).
-_UNIT_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365}
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30, "quarter": 90, "year": 365}
 
 _NUMBER = r"\d+|" + "|".join(_WORD_NUMBERS)
-_UNIT = r"(?P<unit>day|week|month|year)s?"
+_UNIT = r"(?P<unit>day|week|month|quarter|year)s?"
 
 # Strong signal: an explicit quantity immediately followed by a unit,
 # e.g. "60 days", "6-month", "three weeks". Bare "a/an" is intentionally
@@ -70,6 +72,25 @@ def _clamp(days: int) -> int:
     return max(1, min(days, MAX_LOOKBACK_DAYS))
 
 
+def _match_lookback_days(message: str) -> int | None:
+    """Return the explicit lookback window (days) in ``message``, or ``None``.
+
+    Unlike :func:`parse_lookback_days`, this does not substitute a default when
+    the message contains no lookback phrase, so callers can distinguish "the
+    user asked for N days" from "the user didn't specify a window".
+    """
+    if not message:
+        return None
+
+    match = _QTY_UNIT.search(message) or _KEYWORD_UNIT.search(message)
+    if not match:
+        return None
+
+    qty = _qty_value(match.groupdict().get("qty"))
+    unit = match.group("unit").lower()
+    return _clamp(qty * _UNIT_DAYS[unit])
+
+
 def parse_lookback_days(
     message: str, default: int = DEFAULT_LOOKBACK_DAYS
 ) -> int:
@@ -78,13 +99,38 @@ def parse_lookback_days(
     Falls back to ``default`` (30 days) when no lookback phrase is present.
     The result is clamped to ``[1, MAX_LOOKBACK_DAYS]``.
     """
-    if not message:
-        return default
+    matched = _match_lookback_days(message)
+    return default if matched is None else matched
 
-    match = _QTY_UNIT.search(message) or _KEYWORD_UNIT.search(message)
-    if not match:
-        return default
 
-    qty = _qty_value(match.groupdict().get("qty"))
-    unit = match.group("unit").lower()
-    return _clamp(qty * _UNIT_DAYS[unit])
+def _turn_content(turn: Any) -> tuple[str, str]:
+    """Extract ``(role, content)`` from a chat turn (dict or pydantic model)."""
+    if isinstance(turn, dict):
+        return str(turn.get("role") or ""), str(turn.get("content") or "")
+    return str(getattr(turn, "role", "") or ""), str(getattr(turn, "content", "") or "")
+
+
+def resolve_lookback_days(
+    message: str,
+    history: Iterable[Any] | None = None,
+    default: int = DEFAULT_LOOKBACK_DAYS,
+) -> int:
+    """Resolve the lookback window for a chat message, honoring prior turns.
+
+    The window is *sticky* within a conversation: if the current ``message``
+    doesn't name a window ("give me my fuel spend per month") but an earlier
+    user turn did ("look at the past 3 months"), reuse that earlier window
+    instead of silently snapping back to 30 days. The most recent explicit
+    window wins. Falls back to ``default`` when no turn specifies one.
+    """
+    current = _match_lookback_days(message)
+    if current is not None:
+        return current
+
+    for role, content in (_turn_content(t) for t in reversed(list(history or []))):
+        if role.lower() != "user":
+            continue
+        prior = _match_lookback_days(content)
+        if prior is not None:
+            return prior
+    return default
