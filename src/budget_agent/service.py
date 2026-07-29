@@ -51,6 +51,20 @@ def _orchestrator() -> Orchestrator:
     )
 
 
+def _is_transient_upstream(exc: BaseException) -> bool:
+    """True when ``exc`` is an expected, temporary upstream outage (HTTP 429/503).
+
+    An aggregator that is briefly rate-limited by Plaid returns 429; that is a
+    normal, self-healing condition, not a bug. We log it concisely (no stack
+    trace) so it doesn't trip "stack traces in console logs" alerts, while still
+    logging genuinely unexpected failures with a full traceback.
+    """
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code in (429, 503)
+    )
+
+
 def _guard(fn: Callable[[], Any]) -> Any:
     """Run an orchestrator call, surfacing tool/transport failures as HTTP errors."""
     try:
@@ -226,13 +240,22 @@ def chat(req: ChatRequest) -> dict[str, Any]:
         data_status: dict[str, Any] = {"ok": True, "lookback_days": lookback_days}
     except Exception as exc:  # noqa: BLE001 - chat degrades gracefully without a snapshot
         # Don't swallow this silently: an aggregator/analyzer outage would
-        # otherwise look identical to "no accounts connected" to the model.
-        _log.warning(
-            "chat snapshot failed (lookback=%sd): %s",
-            lookback_days,
-            exc,
-            exc_info=True,
-        )
+        # otherwise look identical to "no accounts connected" to the model. But a
+        # transient upstream rate-limit (429) is expected and self-healing, so log
+        # it without a stack trace to avoid tripping error-log alerts.
+        if _is_transient_upstream(exc):
+            _log.warning(
+                "chat snapshot unavailable (lookback=%sd, upstream busy): %s",
+                lookback_days,
+                exc,
+            )
+        else:
+            _log.warning(
+                "chat snapshot failed (lookback=%sd): %s",
+                lookback_days,
+                exc,
+                exc_info=True,
+            )
         analysis = {}
         data_status = {
             "ok": False,
@@ -295,7 +318,10 @@ def payoff(req: PayoffRequest) -> dict[str, Any]:
         analysis = _orchestrator().snapshot()
         data_ok = True
     except Exception as exc:  # noqa: BLE001
-        _log.warning("payoff snapshot failed: %s", exc, exc_info=True)
+        if _is_transient_upstream(exc):
+            _log.warning("payoff snapshot unavailable (upstream busy): %s", exc)
+        else:
+            _log.warning("payoff snapshot failed: %s", exc, exc_info=True)
         analysis = {}
         data_ok = False
 

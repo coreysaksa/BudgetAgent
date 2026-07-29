@@ -3,11 +3,22 @@ import pytest
 from fastapi import HTTPException
 from openai import APIStatusError, RateLimitError
 
-from budget_agent.service import _guard
+from budget_agent.service import _guard, _is_transient_upstream
 
 
 def _resp(status: int) -> httpx.Response:
     return httpx.Response(status, request=httpx.Request("POST", "http://openai"))
+
+
+def test_is_transient_upstream_only_true_for_429_503():
+    def _err(status: int) -> httpx.HTTPStatusError:
+        r = httpx.Response(status, request=httpx.Request("GET", "http://agg/accounts"))
+        return httpx.HTTPStatusError("boom", request=r.request, response=r)
+
+    assert _is_transient_upstream(_err(429)) is True
+    assert _is_transient_upstream(_err(503)) is True
+    assert _is_transient_upstream(_err(500)) is False
+    assert _is_transient_upstream(ValueError("nope")) is False
 
 
 def test_guard_maps_rate_limit_to_retryable_429():
