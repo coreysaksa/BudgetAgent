@@ -195,6 +195,16 @@ class ChatRequest(BaseModel):
     goals: list[ChatGoal] = []
 
 
+class MerchantCandidate(BaseModel):
+    merchant: str | None = None
+    pending_id: str | None = None
+
+
+class AdjudicateRequest(BaseModel):
+    merchant: str
+    candidates: list[MerchantCandidate] = []
+
+
 def _trim_spending_tree(analysis: dict[str, Any], max_txns_per_sub: int = 8) -> None:
     """Cap the per-subcategory transaction lists so the chat prompt stays bounded.
 
@@ -289,6 +299,23 @@ def chat(req: ChatRequest) -> dict[str, Any]:
     return _guard(
         lambda: reasoner.chat_and_plan(req.message, analysis, history, current_goals)
     )
+
+
+@app.post("/adjudicate-merchants")
+def adjudicate_merchants(req: AdjudicateRequest) -> dict[str, Any]:
+    """Judge which candidate merchant names are the same business as ``merchant``.
+
+    Used to auto-resolve borderline fuzzy matches when a user recategorizes a
+    merchant, so obvious misspellings/aliases don't need a manual confirmation.
+    Returns ``{"decisions": [{"merchant", "same"}, ...]}``; when Azure OpenAI is
+    not configured, returns an empty decision set so the caller falls back to
+    asking the user.
+    """
+    reasoner = build_reasoner(_settings())
+    if reasoner is None:
+        return {"decisions": []}
+    candidates = [c.model_dump() for c in req.candidates]
+    return _guard(lambda: reasoner.adjudicate_merchants(req.merchant, candidates))
 
 
 class PayoffRequest(BaseModel):

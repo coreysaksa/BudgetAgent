@@ -22,7 +22,6 @@ class _FakeReasoner:
             "reply": "ok",
             "goals_updated": False,
             "goals": current_goals,
-            "category_rules_proposed": [],
         }
 
 

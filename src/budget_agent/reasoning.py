@@ -17,6 +17,7 @@ from .approval import MoneyAction
 from .config import Settings
 from .models import BudgetPlan
 from .prompts import (
+    ADJUDICATE_SYSTEM_PROMPT as _ADJUDICATE_SYSTEM_PROMPT,
     CHAT_SYSTEM_PROMPT as _CHAT_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT as _PLAN_SYSTEM_PROMPT,
     SYSTEM_PROMPT as _SYSTEM_PROMPT,
@@ -230,34 +231,45 @@ class Reasoner:
         raw = resp.choices[0].message.content or ""
         return self._parse_plan_response(raw, current_goals)
 
+    def adjudicate_merchants(
+        self, merchant: str, candidates: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Judge whether each candidate merchant name is the same business.
+
+        Used to auto-resolve borderline fuzzy matches when the user recategorizes a
+        merchant: for each candidate the model decides if it's the *same* business
+        (e.g. a misspelling or a payment-processor alias). Returns
+        ``{"decisions": [{"merchant": str, "same": bool}, ...]}``.
+        """
+        payload = {"merchant": merchant, "candidates": candidates}
+        resp = self._client.chat.completions.create(
+            model=self._deployment,
+            messages=[
+                {"role": "system", "content": _ADJUDICATE_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload, default=str)},
+            ],
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or ""
+        return {"decisions": self._parse_decisions(raw)}
+
     @staticmethod
-    def _parse_category_rules(value: Any) -> list[dict[str, Any]]:
-        """Validate the model's proposed categorization rules (never auto-applied)."""
-        if not isinstance(value, list):
+    def _parse_decisions(raw: str) -> list[dict[str, Any]]:
+        """Validate the model's same-merchant decisions, ignoring malformed rows."""
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        rows = data.get("decisions") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
             return []
         out: list[dict[str, Any]] = []
-        for item in value:
+        for item in rows:
             if not isinstance(item, dict):
                 continue
-            pattern = str(item.get("pattern") or "").strip()
-            subcategory = str(item.get("subcategory") or "").strip()
-            if not pattern or not subcategory:
-                continue
-            field = str(item.get("field") or "merchant").strip().lower()
-            if field not in ("merchant", "description"):
-                field = "merchant"
-            rule: dict[str, Any] = {
-                "field": field,
-                "pattern": pattern,
-                "subcategory": subcategory,
-            }
-            bucket = str(item.get("bucket") or "").strip().lower()
-            category = str(item.get("category") or "").strip().lower()
-            if bucket in ("mandatory", "discretionary") and category:
-                rule["bucket"] = bucket
-                rule["category"] = category
-                rule["label"] = str(item.get("label") or "").strip() or None
-            out.append(rule)
+            name = str(item.get("merchant") or "").strip()
+            if name:
+                out.append({"merchant": name, "same": bool(item.get("same"))})
         return out
 
     @staticmethod
@@ -273,13 +285,9 @@ class Reasoner:
                 "reply": raw,
                 "goals_updated": False,
                 "goals": current_goals,
-                "category_rules_proposed": [],
             }
 
         reply = str(data.get("reply") or "")
-        category_rules = Reasoner._parse_category_rules(
-            data.get("category_rules_proposed")
-        )
         goals_updated = bool(data.get("goals_updated"))
         goals_raw = data.get("goals")
         if not goals_updated or not isinstance(goals_raw, list):
@@ -287,7 +295,6 @@ class Reasoner:
                 "reply": reply,
                 "goals_updated": False,
                 "goals": current_goals,
-                "category_rules_proposed": category_rules,
             }
 
         # Index current goals by id and by normalized name so we can preserve ids
@@ -310,7 +317,6 @@ class Reasoner:
             "reply": reply,
             "goals_updated": True,
             "goals": goals,
-            "category_rules_proposed": category_rules,
         }
 
 
