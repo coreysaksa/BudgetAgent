@@ -170,6 +170,7 @@ def build_payoff_plan(
     monthly_budget: float,
     start: date | None = None,
     horizon_months: int = _DEFAULT_HORIZON,
+    initial_extra_payment: float = 0.0,
 ) -> dict[str, Any]:
     """Compute a strict month-by-month payoff schedule.
 
@@ -197,7 +198,7 @@ def build_payoff_plan(
         month_label = f"{on.year:04d}-{on.month:02d}"
         active = [s for s in states if not s.paid]
 
-        budget = monthly_budget
+        budget = monthly_budget + (max(0.0, initial_extra_payment) if m == 0 else 0.0)
         paid_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
         interest_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
 
@@ -322,6 +323,7 @@ def build_payoff_plan(
         "total_interest": round(total_interest, 2),
         "total_paid": round(total_paid, 2),
         "months_to_debt_free": len(schedule) if all(s.paid for s in states) else None,
+        "initial_extra_payment": round(max(0.0, initial_extra_payment), 2),
     }
 
 
@@ -367,6 +369,8 @@ def cards_from_accounts(
                 name=name,
                 balance=owed,
                 apr=float(a.get("apr") or 0.0),
+                min_payment=max(0.0, float(a.get("minimum_payment") or 0.0))
+                or None,
                 promos=promos,
                 target_date=target,
             )
@@ -440,6 +444,7 @@ def payoff_from_snapshot(
     monthly_budget: float | None = None,
     start: date | None = None,
     reserve: float | None = None,
+    initial_extra_payment: float = 0.0,
 ) -> dict[str, Any] | None:
     """Build a debt-payoff schedule from a chat snapshot and the user's goals.
 
@@ -508,7 +513,12 @@ def payoff_from_snapshot(
         )
         monthly_budget = max(0.0, surplus - earmarked - reserve_amount)
 
-    plan = build_payoff_plan(cards, monthly_budget=monthly_budget, start=start)
+    plan = build_payoff_plan(
+        cards,
+        monthly_budget=monthly_budget,
+        start=start,
+        initial_extra_payment=initial_extra_payment,
+    )
     plan["derived_budget"] = derived
     plan["scope"] = "goal_cards" if has_debt_goal and only_ids else "all_cards"
     plan["has_debt_goal"] = has_debt_goal

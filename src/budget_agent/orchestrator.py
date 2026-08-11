@@ -13,7 +13,7 @@ from .approval import (
     MoneyAction,
 )
 from .audit import AuditLog
-from .models import BudgetPlan, Goal
+from .models import BudgetPlan, Goal, NecessityOverride, PaycheckInput, Windfall
 from .notifications import Notifier
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
@@ -81,6 +81,7 @@ class Orchestrator:
                 "type": a.type.value,
                 "balance": a.balance,
                 "apr": a.apr,
+                "minimum_payment": a.minimum_payment,
                 "promos": [
                     {
                         "promo_type": p.promo_type,
@@ -94,6 +95,28 @@ class Orchestrator:
             for a in accounts
         ]
         return analysis
+
+    def cash_flow_plan(
+        self,
+        analysis: dict[str, Any],
+        windfalls: list[Windfall] | None = None,
+        *,
+        as_of: str | None = None,
+        month: str | None = None,
+        checking_buffer: float = 250.0,
+        paychecks: list[PaycheckInput] | None = None,
+        necessity_overrides: list[NecessityOverride] | None = None,
+    ) -> dict[str, Any]:
+        """Build deterministic pay-period survival and safe debt-payment targets."""
+        return self.planner.build_cash_flow_plan(
+            analysis,
+            windfalls,
+            as_of=as_of,
+            month=month,
+            checking_buffer=checking_buffer,
+            paychecks=paychecks,
+            necessity_overrides=necessity_overrides,
+        )
 
     def plan(self, analysis, goals: list[Goal]) -> BudgetPlan:
         """Build a budget from goals + analyzed spending."""

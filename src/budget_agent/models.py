@@ -41,6 +41,7 @@ class Account(BaseModel):
     # Annual interest rate as a percentage (e.g. 19.99 for a 19.99% APR card).
     # None when unknown; sourced from parsed statements / credit reports.
     apr: float | None = None
+    minimum_payment: float | None = None
     # Promotional / introductory / balance-transfer rates on this account, each
     # with its own rate, subject balance, and expiry date.
     promos: list[Promo] = Field(default_factory=list)
@@ -115,3 +116,21 @@ class BudgetPlan(BaseModel):
     goal_contributions: dict[str, float] = Field(default_factory=dict)
     unallocated: float = 0.0
     goals: list[Goal] = Field(default_factory=list)
+
+
+class Windfall(BaseModel):
+    name: str
+    amount: float
+    date: date
+    status: str = "estimated"
+
+
+class PaycheckInput(BaseModel):
+    name: str = "Paycheck"
+    amount: float
+    day: int = Field(ge=1, le=31)
+
+
+class NecessityOverride(BaseModel):
+    merchant: str
+    necessity: str

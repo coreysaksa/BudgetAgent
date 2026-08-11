@@ -1,6 +1,6 @@
 import httpx
 
-from budget_agent.models import Goal
+from budget_agent.models import Goal, NecessityOverride, PaycheckInput
 from budget_agent.tools import AggregatorClient, AnalyzerClient, PlannerClient
 
 
@@ -131,6 +131,42 @@ def test_planner_build_plan_defaults_period_when_missing():
     client = PlannerClient("http://plan", transport=_transport(handler))
     plan = client.build_plan({}, [])
     assert plan.period == "unknown"
+
+
+def test_planner_build_cash_flow_plan_posts_structured_analysis():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"month": "2026-08", "scenarios": []})
+
+    client = PlannerClient("http://plan", transport=_transport(handler))
+    result = client.build_cash_flow_plan(
+        {
+            "accounts": [{"id": "c", "name": "Checking", "type": "checking", "balance": 500}],
+            "spending_tree": [{"bucket": "mandatory"}],
+            "income_tree": [{"source": "Payroll"}],
+            "recurring": [{"merchant": "Mortgage"}],
+            "period_days": 90,
+        },
+        checking_buffer=400,
+        paychecks=[
+            PaycheckInput(name="Salary", amount=2500, day=1),
+            PaycheckInput(name="Salary", amount=2500, day=16),
+        ],
+        necessity_overrides=[
+            NecessityOverride(merchant="Daycare", necessity="mandatory")
+        ],
+    )
+    assert result["month"] == "2026-08"
+    assert captured["period_days"] == 90
+    assert captured["checking_buffer"] == 400
+    assert [item["day"] for item in captured["paychecks"]] == [1, 16]
+    assert captured["necessity_overrides"] == [
+        {"merchant": "Daycare", "necessity": "mandatory"}
+    ]
 
 
 def test_client_raises_on_http_error():

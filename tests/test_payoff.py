@@ -27,6 +27,34 @@ def test_single_card_pays_off_no_interest():
     assert plan["total_paid"] >= 1000.0
 
 
+def test_initial_extra_payment_applies_only_to_first_month():
+    plan = build_payoff_plan(
+        [Card(id="a", name="Card A", balance=1500.0, apr=0.0)],
+        monthly_budget=500.0,
+        initial_extra_payment=500.0,
+        start=START,
+    )
+    assert plan["schedule"][0]["total_payment"] == 1000.0
+    assert plan["schedule"][1]["total_payment"] == 500.0
+    assert plan["initial_extra_payment"] == 500.0
+
+
+def test_cards_from_accounts_preserves_actual_minimum_payment():
+    cards = cards_from_accounts(
+        [
+            {
+                "id": "card",
+                "name": "Card",
+                "type": "credit",
+                "balance": -1000,
+                "apr": 20,
+                "minimum_payment": 85,
+            }
+        ]
+    )
+    assert cards[0].min_payment == 85
+
+
 def test_avalanche_targets_highest_apr_first():
     plan = build_payoff_plan(
         [

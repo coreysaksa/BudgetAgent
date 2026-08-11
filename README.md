@@ -66,10 +66,16 @@ tracks burn-down against that allocation.
 
 ## Layout
 
+Credit-card payoff schedules are generated only during an explicit payoff-plan
+conversation. BudgetAgent combines deterministic paycheck survival targets with
+card minimums, APRs, and confirmed one-time income, returns a draft, and marks it
+approved only after the user explicitly asks to save or use the plan.
+
 ```
 src/budget_agent/
   service.py        # FastAPI surface: /health, / (info), /analyze, /plan, /advise,
-                    #   /recommend (read-only), /execute (guardrailed, dry-run only)
+                    #   /cash-flow-plan, /payoff, /recommend (read-only),
+                    #   /execute (guardrailed, dry-run only)
   orchestrator.py   # analyze→plan→propose→approve→execute state machine
   approval.py       # human-approval gate for money-moving actions
   notifications.py  # webhook notifier — fires when proposed actions await approval

@@ -77,6 +77,7 @@ def test_snapshot_enriches_analysis_with_account_balances_and_apr():
     assert card["balance"] == -640.0
     assert card["type"] == "credit"
     assert card["apr"] == 19.99
+    assert card["minimum_payment"] is None
     # Promotional rates flow through so the chat/plan layer can steer payoff.
     assert card["promos"] == [
         {"promo_type": "balance_transfer", "apr": 0.0,

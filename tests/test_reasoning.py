@@ -91,6 +91,41 @@ def test_chat_without_snapshot_omits_snapshot_message():
     assert roles == ["system", "user"]
 
 
+def test_extract_cash_flow_inputs_validates_structured_facts():
+    fake = _FakeChat(
+        json.dumps(
+            {
+                "windfalls": [
+                    {
+                        "name": "SCA",
+                        "amount": 1200,
+                        "date": "2026-08-20",
+                        "status": "confirmed",
+                    }
+                ],
+                "paychecks": [
+                    {"name": "Salary", "amount": 2500, "day": 1},
+                    {"name": "Salary", "amount": 2500, "day": 16},
+                ],
+                "necessity_overrides": [
+                    {"merchant": "Daycare", "necessity": "mandatory"}
+                ],
+                "clarifications": ["What date do you expect the annual bonus?"],
+            }
+        )
+    )
+    result = Reasoner(fake, deployment="gpt-4o-mini").extract_cash_flow_inputs(
+        "My SCA is $1,200 on August 20.",
+        [{"role": "user", "content": "I am paid $2,500 on the 1st and 16th."}],
+    )
+    assert result["windfalls"][0]["name"] == "SCA"
+    assert [item["day"] for item in result["paychecks"]] == [1, 16]
+    assert result["necessity_overrides"] == [
+        {"merchant": "Daycare", "necessity": "mandatory"}
+    ]
+    assert result["clarifications"] == ["What date do you expect the annual bonus?"]
+
+
 def test_chat_and_plan_returns_updated_goals():
     reply = json.dumps(
         {

@@ -11,7 +11,15 @@ from typing import Any
 
 import httpx
 
-from .models import Account, BudgetPlan, Goal, Transaction
+from .models import (
+    Account,
+    BudgetPlan,
+    Goal,
+    NecessityOverride,
+    PaycheckInput,
+    Transaction,
+    Windfall,
+)
 
 _TIMEOUT = 30.0
 
@@ -93,3 +101,36 @@ class PlannerClient(_BaseClient):
         resp = self._client.post("/plan", json=payload)
         resp.raise_for_status()
         return BudgetPlan.model_validate(resp.json())
+
+    def build_cash_flow_plan(
+        self,
+        analysis: dict[str, Any],
+        windfalls: list[Windfall] | None = None,
+        *,
+        as_of: str | None = None,
+        month: str | None = None,
+        checking_buffer: float = 250.0,
+        paychecks: list[PaycheckInput] | None = None,
+        necessity_overrides: list[NecessityOverride] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "as_of": as_of,
+            "month": month,
+            "accounts": analysis.get("accounts", []),
+            "spending_tree": analysis.get("spending_tree", []),
+            "income_tree": analysis.get("income_tree", []),
+            "recurring": analysis.get("recurring", []),
+            "transfers": analysis.get("transfers", []),
+            "period_days": analysis.get("period_days", 30),
+            "windfalls": [w.model_dump(mode="json") for w in (windfalls or [])],
+            "paychecks": [p.model_dump(mode="json") for p in (paychecks or [])],
+            "necessity_overrides": [
+                item.model_dump(mode="json") for item in (necessity_overrides or [])
+            ],
+            "checking_buffer": checking_buffer,
+        }
+        if as_of is None:
+            payload.pop("as_of")
+        resp = self._client.post("/cash-flow-plan", json=payload)
+        resp.raise_for_status()
+        return resp.json()

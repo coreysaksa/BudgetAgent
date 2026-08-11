@@ -11,6 +11,7 @@ The model client is injected (``Protocol``) so tests run without a live endpoint
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any, Protocol
 
 from .approval import MoneyAction
@@ -18,6 +19,7 @@ from .config import Settings
 from .models import BudgetPlan
 from .prompts import (
     ADJUDICATE_SYSTEM_PROMPT as _ADJUDICATE_SYSTEM_PROMPT,
+    CASH_FLOW_INPUT_SYSTEM_PROMPT as _CASH_FLOW_INPUT_SYSTEM_PROMPT,
     CHAT_SYSTEM_PROMPT as _CHAT_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT as _PLAN_SYSTEM_PROMPT,
     SYSTEM_PROMPT as _SYSTEM_PROMPT,
@@ -253,6 +255,32 @@ class Reasoner:
         raw = resp.choices[0].message.content or ""
         return {"decisions": self._parse_decisions(raw)}
 
+    def extract_cash_flow_inputs(
+        self,
+        message: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Extract explicit windfalls, pay dates, and necessity answers for the planner."""
+        conversation = [
+            turn
+            for turn in (history or [])
+            if turn.get("role") in {"user", "assistant"} and turn.get("content")
+        ]
+        conversation.append({"role": "user", "content": message})
+        payload = {
+            "current_date": date.today().isoformat(),
+            "conversation": conversation,
+        }
+        resp = self._client.chat.completions.create(
+            model=self._deployment,
+            messages=[
+                {"role": "system", "content": _CASH_FLOW_INPUT_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload, default=str)},
+            ],
+            response_format={"type": "json_object"},
+        )
+        return self._parse_cash_flow_inputs(resp.choices[0].message.content or "")
+
     @staticmethod
     def _parse_decisions(raw: str) -> list[dict[str, Any]]:
         """Validate the model's same-merchant decisions, ignoring malformed rows."""
@@ -271,6 +299,75 @@ class Reasoner:
             if name:
                 out.append({"merchant": name, "same": bool(item.get("same"))})
         return out
+
+    @staticmethod
+    def _parse_cash_flow_inputs(raw: str) -> dict[str, Any]:
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        windfalls: list[dict[str, Any]] = []
+        for item in data.get("windfalls") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            amount = _to_float(item.get("amount"))
+            when = _to_str(item.get("date"))
+            status = str(item.get("status") or "estimated").strip().lower()
+            try:
+                date.fromisoformat(when or "")
+            except ValueError:
+                when = None
+            if name and amount and amount > 0 and when:
+                windfalls.append(
+                    {
+                        "name": name,
+                        "amount": amount,
+                        "date": when,
+                        "status": status if status in {"confirmed", "estimated"} else "estimated",
+                    }
+                )
+
+        paychecks: list[dict[str, Any]] = []
+        for item in data.get("paychecks") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "Paycheck").strip() or "Paycheck"
+            amount = _to_float(item.get("amount"))
+            try:
+                day = int(item.get("day"))
+            except (TypeError, ValueError):
+                day = 0
+            if amount and amount > 0 and 1 <= day <= 31:
+                paychecks.append({"name": name, "amount": amount, "day": day})
+
+        necessity: list[dict[str, str]] = []
+        for item in data.get("necessity_overrides") or []:
+            if not isinstance(item, dict):
+                continue
+            merchant = str(item.get("merchant") or "").strip()
+            value = str(item.get("necessity") or "").strip().lower()
+            if merchant and value in {"mandatory", "discretionary"}:
+                necessity.append({"merchant": merchant, "necessity": value})
+
+        clarifications: list[str] = []
+        for item in data.get("clarifications") or []:
+            question = (
+                str(item.get("question") or "").strip()
+                if isinstance(item, dict)
+                else str(item or "").strip()
+            )
+            if question:
+                clarifications.append(question)
+        return {
+            "windfalls": windfalls,
+            "paychecks": paychecks,
+            "necessity_overrides": necessity,
+            "clarifications": clarifications,
+        }
 
     @staticmethod
     def _parse_plan_response(
