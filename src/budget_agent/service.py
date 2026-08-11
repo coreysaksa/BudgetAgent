@@ -30,6 +30,7 @@ from .models import (
 from .notifications import Notifier
 from .orchestrator import Orchestrator
 from .payoff import payoff_from_snapshot
+from .payoff_scenario import build_payoff_scenario
 from .reasoning import build_reasoner
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
@@ -203,6 +204,28 @@ class ChatRequest(BaseModel):
     windfalls: list[Windfall] = []
     checking_buffer: float = 250.0
     payoff_plan_active: bool = False
+
+
+class ExtraIncomeScenarioInput(BaseModel):
+    id: str | None = None
+    name: str
+    amount: float
+    frequency: str = "one_time"
+    first_date: str | None = None
+    end_date: str | None = None
+    dates: list[str] = []
+    status: str = "estimated"
+    debt_percent: float = 100.0
+
+
+class PayoffScenarioRequest(BaseModel):
+    extra_income: list[ExtraIncomeScenarioInput] = []
+    spending_adjustments: dict[str, float] = {}
+    debt_allocation_percent: float = 100.0
+    monthly_debt_extra: float | None = None
+    checking_buffer: float = 250.0
+    goals: list[ChatGoal] = []
+    use_ai_suggestions: bool = True
 
 
 class MerchantCandidate(BaseModel):
@@ -396,6 +419,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - base chat remains available
             _log.warning("cash-flow input extraction unavailable: %s", exc)
     payoff_plan: dict[str, Any] | None = None
+    payoff_scenario: dict[str, Any] | None = None
     cash_flow_plan: dict[str, Any] | None = None
     payoff_ready = False
     if analysis and payoff_context:
@@ -451,23 +475,78 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             )
             current_baseline_extra = _scenario_safe_extra(baseline_cash_flow)
             confirmed_extra = _scenario_safe_extra(cash_flow_plan)
-            payoff_plan = payoff_from_snapshot(
-                planner_analysis,
-                current_goals,
-                monthly_budget=minimum_total + baseline_extra,
-                initial_extra_payment=max(
-                    0.0, confirmed_extra - current_baseline_extra
-                ),
+            confirmed_windfall_total = sum(
+                item.amount
+                for item in structured_windfalls
+                if item.status == "confirmed"
             )
+            safe_windfall_extra = max(
+                0.0, confirmed_extra - current_baseline_extra
+            )
+            confirmed_debt_percent = (
+                min(100.0, safe_windfall_extra * 100.0 / confirmed_windfall_total)
+                if confirmed_windfall_total > 0
+                else 100.0
+            )
+            estimated_windfall_total = sum(
+                item.amount
+                for item in structured_windfalls
+                if item.status == "estimated"
+            )
+            scenarios = cash_flow_plan.get("scenarios") or []
+            estimated_scenario_extra = (
+                max(
+                    0.0,
+                    float(scenarios[1].get("safe_extra_payment") or 0.0)
+                    - confirmed_extra,
+                )
+                if len(scenarios) > 1
+                else 0.0
+            )
+            estimated_debt_percent = (
+                min(
+                    100.0,
+                    estimated_scenario_extra * 100.0 / estimated_windfall_total,
+                )
+                if estimated_windfall_total > 0
+                else 100.0
+            )
+            payoff_scenario = build_payoff_scenario(
+                planner_analysis,
+                baseline_cash_flow,
+                [],
+                extra_income=[
+                    {
+                        "name": item.name,
+                        "amount": item.amount,
+                        "frequency": "one_time",
+                        "first_date": item.date.isoformat(),
+                        "status": item.status,
+                        "debt_percent": (
+                            confirmed_debt_percent
+                            if item.status == "confirmed"
+                            else estimated_debt_percent
+                        ),
+                    }
+                    for item in structured_windfalls
+                ],
+            )
+            payoff_plan = payoff_scenario.get("plan")
             critical_questions = [
                 item
                 for item in cash_flow_plan.get("clarification_questions") or []
                 if item.get("critical")
             ]
             payoff_ready = payoff_plan is not None and not critical_questions
+            payoff_ready = payoff_ready and (
+                payoff_scenario.get("feasibility", {}).get("status") == "feasible"
+            )
             if payoff_plan is not None:
                 payoff_plan["minimum_payment_total"] = round(minimum_total, 2)
                 payoff_plan["safe_extra_payment"] = round(baseline_extra, 2)
+                payoff_plan["initial_extra_payment"] = round(
+                    safe_windfall_extra, 2
+                )
                 prompt_plan = payoff_plan
                 sched = payoff_plan.get("schedule") or []
                 if len(sched) > 24:
@@ -494,6 +573,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             "payoff_plan_ready": payoff_ready,
             "payoff_plan": payoff_plan,
             "cash_flow_plan": cash_flow_plan,
+            "payoff_scenario": payoff_scenario,
         }
     )
     return result
@@ -532,6 +612,48 @@ class CashFlowRequest(BaseModel):
     paychecks: list[PaycheckInput] = []
     necessity_overrides: list[NecessityOverride] = []
     checking_buffer: float = 250.0
+
+
+@app.post("/payoff-scenario")
+def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
+    """Build an editable, deterministic credit-card payoff what-if proposal."""
+    analysis = _guard(lambda: _orchestrator().snapshot(days=180))
+    cash_flow = _guard(
+        lambda: _orchestrator().cash_flow_plan(
+            analysis,
+            [],
+            checking_buffer=req.checking_buffer,
+        )
+    )
+    scenario = _guard(
+        lambda: build_payoff_scenario(
+            analysis,
+            cash_flow,
+            [],
+            extra_income=(
+                None
+                if req.use_ai_suggestions
+                else [item.model_dump(mode="json") for item in req.extra_income]
+            ),
+            spending_adjustments=req.spending_adjustments,
+            debt_allocation_percent=req.debt_allocation_percent,
+            monthly_debt_extra=req.monthly_debt_extra,
+        )
+    )
+    critical = [
+        item
+        for item in cash_flow.get("clarification_questions") or []
+        if item.get("critical")
+    ]
+    return {
+        "data_ok": True,
+        "ready": (
+            scenario.get("plan") is not None
+            and not critical
+            and scenario.get("feasibility", {}).get("status") == "feasible"
+        ),
+        "scenario": scenario,
+    }
 
 
 @app.post("/cash-flow-plan")

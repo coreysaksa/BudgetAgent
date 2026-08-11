@@ -171,6 +171,7 @@ def build_payoff_plan(
     start: date | None = None,
     horizon_months: int = _DEFAULT_HORIZON,
     initial_extra_payment: float = 0.0,
+    extra_payments_by_month: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Compute a strict month-by-month payoff schedule.
 
@@ -190,6 +191,8 @@ def build_payoff_plan(
     schedule: list[dict[str, Any]] = []
     total_interest = 0.0
     total_paid = 0.0
+    minimum_shortfall = False
+    extra_payments_by_month = extra_payments_by_month or {}
 
     for m in range(horizon_months):
         if all(s.paid for s in states):
@@ -197,8 +200,13 @@ def build_payoff_plan(
         on = _add_months(start, m)
         month_label = f"{on.year:04d}-{on.month:02d}"
         active = [s for s in states if not s.paid]
+        required_minimums = {s.card.id: _min_payment(s) for s in active}
 
-        budget = monthly_budget + (max(0.0, initial_extra_payment) if m == 0 else 0.0)
+        budget = (
+            monthly_budget
+            + (max(0.0, initial_extra_payment) if m == 0 else 0.0)
+            + max(0.0, float(extra_payments_by_month.get(month_label) or 0.0))
+        )
         paid_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
         interest_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
 
@@ -215,14 +223,17 @@ def build_payoff_plan(
 
         # 2) Minimum payments on every card.
         for s in active:
-            pay = min(_min_payment(s), budget)
+            pay = min(required_minimums[s.card.id], budget)
             if pay > 0:
                 _pay_card(s, pay, on)
                 paid_this_month[s.card.id] += pay
                 budget -= pay
-        if budget <= _EPSILON and any(
-            _min_payment(s) > paid_this_month[s.card.id] + _EPSILON for s in active
+        if any(
+            required_minimums[s.card.id]
+            > paid_this_month[s.card.id] + _EPSILON
+            for s in active
         ):
+            minimum_shortfall = True
             warnings.append(
                 f"{month_label}: budget of ${monthly_budget:,.0f}/mo can't cover the "
                 "minimum payments on all cards."
@@ -284,7 +295,7 @@ def build_payoff_plan(
 
     # Per-card summary + feasibility.
     card_summaries: list[dict[str, Any]] = []
-    feasible = True
+    feasible = not minimum_shortfall
     for s in states:
         on_time = True
         if s.deadline is not None:
@@ -312,6 +323,11 @@ def build_payoff_plan(
                 "total_interest": round(s.total_interest, 2),
             }
         )
+    if not all(s.paid for s in states):
+        feasible = False
+        warnings.append(
+            f"The plan does not pay off every card within {horizon_months} months."
+        )
 
     return {
         "monthly_budget": round(monthly_budget, 2),
@@ -324,6 +340,11 @@ def build_payoff_plan(
         "total_paid": round(total_paid, 2),
         "months_to_debt_free": len(schedule) if all(s.paid for s in states) else None,
         "initial_extra_payment": round(max(0.0, initial_extra_payment), 2),
+        "extra_payments_by_month": {
+            month: round(max(0.0, float(amount)), 2)
+            for month, amount in extra_payments_by_month.items()
+            if amount > 0
+        },
     }
 
 
@@ -445,6 +466,7 @@ def payoff_from_snapshot(
     start: date | None = None,
     reserve: float | None = None,
     initial_extra_payment: float = 0.0,
+    extra_payments_by_month: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
     """Build a debt-payoff schedule from a chat snapshot and the user's goals.
 
@@ -488,9 +510,7 @@ def payoff_from_snapshot(
                 # A milestone date is the most specific deadline — it wins.
                 deadlines[acc_id] = due
 
-    cards = cards_from_accounts(
-        accounts, deadlines=deadlines, only_ids=only_ids or None
-    )
+    cards = cards_from_accounts(accounts, deadlines=deadlines)
     if not cards:
         return None
 
@@ -518,9 +538,10 @@ def payoff_from_snapshot(
         monthly_budget=monthly_budget,
         start=start,
         initial_extra_payment=initial_extra_payment,
+        extra_payments_by_month=extra_payments_by_month,
     )
     plan["derived_budget"] = derived
-    plan["scope"] = "goal_cards" if has_debt_goal and only_ids else "all_cards"
+    plan["scope"] = "all_cards"
     plan["has_debt_goal"] = has_debt_goal
     plan["essentials_reserve"] = reserve_amount
     plan["essentials_reserve_auto"] = reserve_auto

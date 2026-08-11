@@ -71,6 +71,11 @@ conversation. BudgetAgent combines deterministic paycheck survival targets with
 card minimums, APRs, and confirmed one-time income, returns a draft, and marks it
 approved only after the user explicitly asks to save or use the plan.
 
+The payoff-scenario API also supports editable what-if assumptions: protected
+fixed bills, adjustable essential/discretionary categories, dated one-time or
+recurring extra income, debt-allocation percentages, and deterministic
+feasibility checks.
+
 ```
 src/budget_agent/
   service.py        # FastAPI surface: /health, / (info), /analyze, /plan, /advise,

@@ -158,14 +158,17 @@ def test_explicit_payoff_request_returns_draft_without_saving_goal(
                 "goals": [{"name": "Pay off cards", "kind": "debt_payoff"}],
             }
 
-    def payoff(*args, **kwargs):
+    def scenario(*args, **kwargs):
         return {
-            "schedule": [],
-            "months_to_debt_free": 8,
-            "monthly_budget": kwargs["monthly_budget"],
+            "plan": {
+                "schedule": [],
+                "months_to_debt_free": 8,
+                "monthly_budget": 475.0,
+            },
+            "feasibility": {"feasible": True, "status": "feasible"},
         }
 
-    monkeypatch.setattr(service, "payoff_from_snapshot", payoff)
+    monkeypatch.setattr(service, "build_payoff_scenario", scenario)
     reasoner = DraftReasoner()
     orch = _FakeOrchestrator(
         snapshot={
@@ -204,11 +207,8 @@ def test_old_payoff_request_does_not_trigger_unrelated_message(monkeypatch):
 
     monkeypatch.setattr(
         service,
-        "payoff_from_snapshot",
-        lambda *args, **kwargs: {
-            "schedule": [],
-            "monthly_budget": kwargs["monthly_budget"],
-        },
+        "build_payoff_scenario",
+        lambda *args, **kwargs: {"plan": {"schedule": [], "monthly_budget": 400}},
     )
     client = _wire(
         monkeypatch,
@@ -244,11 +244,8 @@ def test_active_payoff_draft_allows_clarification_followup(monkeypatch):
 
     monkeypatch.setattr(
         service,
-        "payoff_from_snapshot",
-        lambda *args, **kwargs: {
-            "schedule": [],
-            "monthly_budget": kwargs["monthly_budget"],
-        },
+        "build_payoff_scenario",
+        lambda *args, **kwargs: {"plan": {"schedule": [], "monthly_budget": 400}},
     )
     client = _wire(
         monkeypatch,

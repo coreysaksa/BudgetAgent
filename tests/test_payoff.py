@@ -55,6 +55,27 @@ def test_cards_from_accounts_preserves_actual_minimum_payment():
     assert cards[0].min_payment == 85
 
 
+def test_plan_is_infeasible_when_budget_cannot_cover_minimums():
+    plan = build_payoff_plan(
+        [Card(id="a", name="Card A", balance=1000, apr=0, min_payment=100)],
+        monthly_budget=50,
+        start=START,
+    )
+    assert plan["feasible"] is False
+    assert any("can't cover the minimum payments" in item for item in plan["warnings"])
+
+
+def test_plan_is_infeasible_when_debt_remains_at_horizon():
+    plan = build_payoff_plan(
+        [Card(id="a", name="Card A", balance=1000, apr=30, min_payment=25)],
+        monthly_budget=25,
+        start=START,
+        horizon_months=12,
+    )
+    assert plan["feasible"] is False
+    assert any("within 12 months" in item for item in plan["warnings"])
+
+
 def test_avalanche_targets_highest_apr_first():
     plan = build_payoff_plan(
         [
@@ -182,7 +203,7 @@ def test_payoff_from_snapshot_derives_budget_and_deadlines():
     # Budget derived = surplus 2400 − 400 (non-debt goal) = 2000.
     assert plan["monthly_budget"] == 2000.0
     assert plan["derived_budget"] is True
-    assert plan["scope"] == "goal_cards"
+    assert plan["scope"] == "all_cards"
     cards = {c["id"]: c for c in plan["cards"]}
     # Chase milestone forces a 2026-07 deadline; BoA promo forces 2026-10-14.
     assert cards["chase"]["deadline"] == "2026-07-31"
