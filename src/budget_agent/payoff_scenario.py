@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import calendar
 from datetime import date
-from typing import Any
 from statistics import median
+from typing import Any, TypedDict
 
 from .payoff import payoff_from_snapshot
 
@@ -17,6 +17,16 @@ _VARIABLE_ESSENTIALS = {
 }
 _DINING = {"dining", "coffee", "delivery"}
 _FREQUENCIES = {"one_time", "monthly", "quarterly", "annual", "custom"}
+_STABLE_UTILITIES = {"internet", "cell_phone"}
+_SEASONAL_UTILITIES = {"electric", "gas_utility", "water"}
+_UTILITY_SUBCATEGORIES = _STABLE_UTILITIES | _SEASONAL_UTILITIES
+
+
+class UtilityHistorySnapshot(TypedDict, total=False):
+    """Longer analyzer snapshot used only for deterministic utility forecasting."""
+
+    period_days: int | float
+    spending_tree: list[dict[str, Any]]
 
 
 def _parse_date(value: Any) -> date | None:
@@ -49,10 +59,16 @@ def _spending_rows(
                     0.0,
                     float(subcategory.get("total") or 0.0) * 30.0 / period_days,
                 )
-                adjustable = bucket_name == "discretionary" or key in _VARIABLE_ESSENTIALS
+                adjustable = (
+                    key not in _UTILITY_SUBCATEGORIES
+                    and (
+                        bucket_name == "discretionary"
+                        or key in _VARIABLE_ESSENTIALS
+                    )
+                )
                 minimum = current * 0.7 if key in _VARIABLE_ESSENTIALS else 0.0
                 default = current
-                if bucket_name == "discretionary":
+                if adjustable and bucket_name == "discretionary":
                     default = current * (0.75 if key in _DINING else 0.9)
                 proposed = (
                     max(0.0, float(adjustments[key]))
@@ -71,6 +87,113 @@ def _spending_rows(
                     }
                 )
     return rows
+
+
+def _utility_forecast(
+    spending: list[dict[str, Any]],
+    utility_history: UtilityHistorySnapshot | None,
+    *,
+    start: date,
+) -> dict[str, Any]:
+    stable_monthly = sum(
+        row["current_monthly"] for row in spending if row["key"] in _STABLE_UTILITIES
+    )
+    current_seasonal = sum(
+        row["current_monthly"] for row in spending if row["key"] in _SEASONAL_UTILITIES
+    )
+    monthly_totals: dict[str, float] = {}
+    history_days = max(
+        1,
+        int(float((utility_history or {}).get("period_days") or 730)),
+    )
+    history_start = date.fromordinal(max(1, start.toordinal() - history_days + 1))
+    partial_start_month = (
+        history_start.strftime("%Y-%m") if history_start.day > 1 else None
+    )
+    current_month = start.strftime("%Y-%m")
+    for bucket in (utility_history or {}).get("spending_tree") or []:
+        for category in bucket.get("categories") or []:
+            for subcategory in category.get("subcategories") or []:
+                if subcategory.get("subcategory") not in _SEASONAL_UTILITIES:
+                    continue
+                for transaction in subcategory.get("transactions") or []:
+                    when = _parse_date(transaction.get("date"))
+                    try:
+                        amount = abs(float(transaction.get("amount") or 0.0))
+                    except (TypeError, ValueError):
+                        continue
+                    if when is None or amount <= 0:
+                        continue
+                    month = when.strftime("%Y-%m")
+                    if month == current_month or month == partial_start_month:
+                        continue
+                    monthly_totals[month] = monthly_totals.get(month, 0.0) + amount
+
+    history_months = len(monthly_totals)
+    if history_months >= 12:
+        safety_margin = 0.10
+        confidence = "high"
+    elif history_months >= 6:
+        safety_margin = 0.15
+        confidence = "medium"
+    else:
+        safety_margin = 0.20
+        confidence = "low"
+
+    historical_values = list(monthly_totals.values())
+    fallback = median(historical_values) if historical_values else current_seasonal
+    fallback = max(current_seasonal, fallback)
+    values_by_calendar_month: dict[int, list[float]] = {}
+    for month, amount in monthly_totals.items():
+        calendar_month = int(month[-2:])
+        values_by_calendar_month.setdefault(calendar_month, []).append(amount)
+
+    forecasts: list[dict[str, Any]] = []
+    base_values: list[float] = []
+    for offset in range(1, 13):
+        forecast_month = _add_months(start.replace(day=1), offset)
+        comparable = values_by_calendar_month.get(forecast_month.month) or []
+        seasonal_amount = median(comparable) if comparable else fallback
+        protected_amount = seasonal_amount * (1.0 + safety_margin)
+        base_values.append(seasonal_amount)
+        forecasts.append(
+            {
+                "month": forecast_month.strftime("%Y-%m"),
+                "seasonal_forecast": round(seasonal_amount, 2),
+                "protected_seasonal_reserve": round(protected_amount, 2),
+                "total_utility_reserve": round(stable_monthly + protected_amount, 2),
+                "basis": "same_calendar_month" if comparable else "median_fallback",
+            }
+        )
+
+    level_reserve = sum(base_values) / len(base_values) if base_values else fallback
+    protected_reserve = level_reserve * (1.0 + safety_margin)
+    incremental_reserve = max(0.0, protected_reserve - current_seasonal)
+    protected_monthly_values = [
+        value * (1.0 + safety_margin) for value in base_values
+    ]
+    return {
+        "stable_monthly_amount": round(stable_monthly, 2),
+        "current_monthly_seasonal_baseline": round(current_seasonal, 2),
+        "level_monthly_seasonal_reserve": round(level_reserve, 2),
+        "recommended_protected_monthly_reserve": round(protected_reserve, 2),
+        "recommended_total_monthly_utility_reserve": round(
+            stable_monthly + protected_reserve, 2
+        ),
+        "incremental_monthly_reserve": round(incremental_reserve, 2),
+        "low_forecast": round(
+            min(protected_monthly_values) if protected_monthly_values else protected_reserve,
+            2,
+        ),
+        "high_forecast": round(
+            max(protected_monthly_values) if protected_monthly_values else protected_reserve,
+            2,
+        ),
+        "confidence": confidence,
+        "history_months": history_months,
+        "safety_margin_percentage": round(safety_margin * 100.0, 2),
+        "next_12_month_forecasts": forecasts,
+    }
 
 
 def _income_occurrences(
@@ -199,6 +322,7 @@ def build_payoff_scenario(
     cash_flow_plan: dict[str, Any],
     goals: list[dict[str, Any]],
     *,
+    utility_history: UtilityHistorySnapshot | None = None,
     extra_income: list[dict[str, Any]] | None = None,
     spending_adjustments: dict[str, float] | None = None,
     debt_allocation_percent: float = 100.0,
@@ -206,6 +330,13 @@ def build_payoff_scenario(
 ) -> dict[str, Any]:
     """Build an editable proposal and a deterministic payoff feasibility result."""
     spending = _spending_rows(analysis, spending_adjustments or {})
+    today = date.today()
+    utility_forecast = _utility_forecast(
+        spending,
+        utility_history,
+        start=today,
+    )
+    utility_reserve_increment = utility_forecast["incremental_monthly_reserve"]
     essential_delta = sum(
         row["current_monthly"] - row["proposed_monthly"]
         for row in spending
@@ -226,7 +357,12 @@ def build_payoff_scenario(
     baseline_extra = max(
         0.0, float(cash_flow_plan.get("recurring_safe_extra_payment") or 0.0)
     )
-    safe_before_floor = baseline_extra + essential_delta - proposed_discretionary
+    safe_before_floor = (
+        baseline_extra
+        + essential_delta
+        - proposed_discretionary
+        - utility_reserve_increment
+    )
     safe_extra = max(0.0, safe_before_floor)
     allocation_percent = min(100.0, max(0.0, float(debt_allocation_percent)))
     requested_extra = (
@@ -239,7 +375,6 @@ def build_payoff_scenario(
         for account in analysis.get("accounts") or []
         if account.get("type") == "credit"
     )
-    today = date.today()
     proposed_income = (
         suggest_extra_income(analysis) if extra_income is None else extra_income
     )
@@ -299,7 +434,10 @@ def build_payoff_scenario(
             * 30.0
             / max(1.0, float(analysis.get("period_days") or 30.0))
         )
-    minimum_survival = max(0.0, regular_income - baseline_extra)
+    minimum_survival = max(
+        0.0,
+        regular_income - baseline_extra + utility_reserve_increment,
+    )
     if plan is not None:
         plan["minimum_payment_total"] = round(minimum_total, 2)
         plan["safe_extra_payment"] = round(safe_extra, 2)
@@ -317,6 +455,7 @@ def build_payoff_scenario(
         ),
         "debt_allocation_percent": round(allocation_percent, 2),
         "spending": spending,
+        "utility_forecast": utility_forecast,
         "extra_income": streams,
         "extra_payments_by_month": {
             month: round(amount, 2) for month, amount in extra_payments.items()

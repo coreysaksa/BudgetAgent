@@ -9,17 +9,27 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from datetime import date
 from functools import lru_cache
 from typing import Any, Callable
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from openai import APIError, APIStatusError, RateLimitError
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    field_validator,
+)
 
 from .approval import ApprovalPolicy, MoneyAction
 from .config import Settings
-from .lookback import resolve_lookback_days
+from .lookback import MAX_LOOKBACK_DAYS, resolve_lookback_days
 from .models import (
     BudgetPlan,
     Goal,
@@ -197,6 +207,48 @@ class ChatGoal(BaseModel):
     notes: str | None = None
 
 
+PageContextValue = StrictBool | StrictInt | StrictFloat | StrictStr | None
+
+
+class PageContext(BaseModel):
+    """Untrusted UI context used only to orient the conversational reasoner."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    page: str | None = Field(default=None, max_length=100)
+    title: str | None = Field(default=None, max_length=160)
+    route: str | None = Field(default=None, max_length=200)
+    selected_month: str | None = None
+    summary: dict[str, PageContextValue] = Field(default_factory=dict, max_length=20)
+
+    @field_validator("selected_month")
+    @classmethod
+    def validate_selected_month(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        try:
+            parsed = date.fromisoformat(f"{value}-01")
+        except ValueError as exc:
+            raise ValueError("selected_month must use YYYY-MM format") from exc
+        if parsed.strftime("%Y-%m") != value:
+            raise ValueError("selected_month must use YYYY-MM format")
+        return value
+
+    @field_validator("summary")
+    @classmethod
+    def sanitize_summary(
+        cls, value: dict[str, PageContextValue]
+    ) -> dict[str, PageContextValue]:
+        sanitized: dict[str, PageContextValue] = {}
+        for key, item in value.items():
+            clean_key = key.strip()
+            if not clean_key or len(clean_key) > 64:
+                raise ValueError("page context summary keys must be 1-64 characters")
+            sanitized[clean_key] = item.strip()[:500] if isinstance(item, str) else item
+        return sanitized
+
+
 class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
@@ -204,6 +256,7 @@ class ChatRequest(BaseModel):
     windfalls: list[Windfall] = []
     checking_buffer: float = 250.0
     payoff_plan_active: bool = False
+    page_context: PageContext | None = None
 
 
 class ExtraIncomeScenarioInput(BaseModel):
@@ -255,6 +308,16 @@ def _trim_spending_tree(analysis: dict[str, Any], max_txns_per_sub: int = 8) -> 
                 if len(txns) > max_txns_per_sub:
                     sub["transactions"] = txns[:max_txns_per_sub]
                     sub["transactions_truncated"] = len(txns)
+
+
+def _selected_month_lookback(selected_month: str | None) -> int:
+    if not selected_month:
+        return 0
+    month_start = date.fromisoformat(f"{selected_month}-01")
+    today = date.today()
+    if month_start > today:
+        return 0
+    return min(MAX_LOOKBACK_DAYS, (today - month_start).days + 1)
 
 
 def _has_cash_flow_context(message: str, history: list[dict[str, str]]) -> bool:
@@ -372,9 +435,31 @@ def chat(req: ChatRequest) -> dict[str, Any]:
     # "past 6 months", "last quarter"); default to 30 days when they don't ask.
     # The window is sticky across turns: a follow-up that doesn't restate the
     # window keeps the last one the user named instead of snapping back to 30.
-    lookback_days = resolve_lookback_days(req.message, req.history)
+    conversational_lookback = resolve_lookback_days(req.message, req.history)
+    selected_month = req.page_context.selected_month if req.page_context else None
+    lookback_days = max(
+        conversational_lookback,
+        _selected_month_lookback(selected_month),
+    )
+    route = req.page_context.route if req.page_context else None
+    scoped_month = (
+        selected_month
+        if selected_month
+        and route
+        and (
+            route.startswith("/app/overview")
+            or route.startswith("/app/transactions")
+        )
+        else None
+    )
     try:
-        analysis = _orchestrator().snapshot(days=lookback_days)
+        if scoped_month:
+            analysis = _orchestrator().snapshot(
+                days=lookback_days,
+                month=scoped_month,
+            )
+        else:
+            analysis = _orchestrator().snapshot(days=lookback_days)
         data_status: dict[str, Any] = {"ok": True, "lookback_days": lookback_days}
     except Exception as exc:  # noqa: BLE001 - chat degrades gracefully without a snapshot
         # Don't swallow this silently: an aggregator/analyzer outage would
@@ -424,6 +509,11 @@ def chat(req: ChatRequest) -> dict[str, Any]:
     payoff_ready = False
     if analysis and payoff_context:
         try:
+            try:
+                utility_history = _orchestrator().snapshot(days=730)
+            except Exception as exc:  # noqa: BLE001 - payoff chat can use fallback reserve
+                _log.warning("utility history unavailable for payoff chat: %s", exc)
+                utility_history = None
             structured_windfalls = _merge_windfalls(
                 req.windfalls,
                 [Windfall.model_validate(item) for item in extracted["windfalls"]],
@@ -515,6 +605,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                 planner_analysis,
                 baseline_cash_flow,
                 [],
+                utility_history=utility_history,
                 extra_income=[
                     {
                         "name": item.name,
@@ -561,6 +652,8 @@ def chat(req: ChatRequest) -> dict[str, Any]:
     # Always surface how the data load went so the model can distinguish a
     # temporary fetch failure from a genuinely empty account set.
     analysis = analysis or {}
+    if req.page_context is not None:
+        analysis["page_context"] = req.page_context.model_dump(exclude_none=True)
     analysis["data_status"] = data_status
     result = _guard(
         lambda: reasoner.chat_and_plan(req.message, analysis, history, current_goals)
@@ -617,9 +710,15 @@ class CashFlowRequest(BaseModel):
 @app.post("/payoff-scenario")
 def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
     """Build an editable, deterministic credit-card payoff what-if proposal."""
-    analysis = _guard(lambda: _orchestrator().snapshot(days=180))
+    orchestrator = _orchestrator()
+    analysis = _guard(lambda: orchestrator.snapshot(days=180))
+    try:
+        utility_history = orchestrator.snapshot(days=MAX_LOOKBACK_DAYS)
+    except Exception as exc:  # noqa: BLE001 - current payoff analysis remains usable
+        _log.warning("utility history unavailable for payoff scenario: %s", exc)
+        utility_history = None
     cash_flow = _guard(
-        lambda: _orchestrator().cash_flow_plan(
+        lambda: orchestrator.cash_flow_plan(
             analysis,
             [],
             checking_buffer=req.checking_buffer,
@@ -630,6 +729,7 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
             analysis,
             cash_flow,
             [],
+            utility_history=utility_history,
             extra_income=(
                 None
                 if req.use_ai_suggestions

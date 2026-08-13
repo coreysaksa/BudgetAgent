@@ -65,12 +65,14 @@ class AnalyzerClient(_BaseClient):
         transactions: list[Transaction],
         period_days: int = 30,
         petty_cash_allowance: float = 0.0,
+        month: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "accounts": [a.model_dump(mode="json") for a in accounts],
             "transactions": [t.model_dump(mode="json") for t in transactions],
             "period_days": period_days,
             "petty_cash_allowance": petty_cash_allowance,
+            "month": month,
         }
         resp = self._client.post("/analyze", json=payload)
         resp.raise_for_status()

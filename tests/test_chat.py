@@ -42,10 +42,16 @@ class _FakeOrchestrator:
         self._snapshot = snapshot if snapshot is not None else {"accounts": []}
         self._error = error
         self.seen_days: int | None = None
+        self.seen_month: str | None = None
         self.cash_flow_txn_counts: list[int] = []
 
-    def snapshot(self, days: int = 30) -> dict[str, Any]:
+    def snapshot(
+        self,
+        days: int = 30,
+        month: str | None = None,
+    ) -> dict[str, Any]:
         self.seen_days = days
+        self.seen_month = month
         if self._error is not None:
             raise self._error
         return dict(self._snapshot)
@@ -111,6 +117,87 @@ def test_chat_widens_window_from_message(monkeypatch):
     assert reasoner.seen_analysis["data_status"]["lookback_days"] == 180
 
 
+def test_chat_supplies_sanitized_page_context_to_reasoner(monkeypatch):
+    reasoner = _FakeReasoner()
+    orch = _FakeOrchestrator(snapshot={"accounts": [], "total_inflow": 0.0})
+    client = _wire(monkeypatch, reasoner, orch)
+
+    resp = client.post(
+        "/chat",
+        json={
+            "message": "What stands out here?",
+            "page_context": {
+                "page": "  Monthly spending  ",
+                "title": "August overview",
+                "route": "/budget/monthly",
+                "selected_month": "2026-08",
+                "summary": {
+                    "selected_category": "  Utilities  ",
+                    "transaction_count": 12,
+                    "is_filtered": True,
+                },
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    assert reasoner.seen_analysis["page_context"] == {
+        "page": "Monthly spending",
+        "title": "August overview",
+        "route": "/budget/monthly",
+        "selected_month": "2026-08",
+        "summary": {
+            "selected_category": "Utilities",
+            "transaction_count": 12,
+            "is_filtered": True,
+        },
+    }
+
+
+def test_chat_widens_lookback_to_include_selected_month(monkeypatch):
+    reasoner = _FakeReasoner()
+    orch = _FakeOrchestrator(snapshot={"accounts": [], "total_inflow": 0.0})
+    client = _wire(monkeypatch, reasoner, orch)
+    today = date.today()
+    total = today.year * 12 + today.month - 1 - 4
+    year, month_index = divmod(total, 12)
+    selected = date(year, month_index + 1, 1)
+    expected = min(730, (today - selected).days + 1)
+
+    resp = client.post(
+        "/chat",
+        json={
+            "message": "How did I do?",
+            "page_context": {"selected_month": selected.strftime("%Y-%m")},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert orch.seen_days == expected
+    assert reasoner.seen_analysis["lookback_days"] == expected
+    assert reasoner.seen_analysis["data_status"]["lookback_days"] == expected
+
+
+def test_chat_scopes_overview_and_transaction_context_to_selected_month(monkeypatch):
+    reasoner = _FakeReasoner()
+    orch = _FakeOrchestrator(snapshot={"accounts": [], "total_inflow": 0.0})
+    client = _wire(monkeypatch, reasoner, orch)
+
+    resp = client.post(
+        "/chat",
+        json={
+            "message": "What changed here?",
+            "page_context": {
+                "route": "/app/transactions/spending",
+                "selected_month": "2026-07",
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    assert orch.seen_month == "2026-07"
+
+
 def test_chat_surfaces_degraded_data_status_on_snapshot_failure(monkeypatch):
     reasoner = _FakeReasoner()
     orch = _FakeOrchestrator(error=RuntimeError("aggregator down"))
@@ -158,7 +245,10 @@ def test_explicit_payoff_request_returns_draft_without_saving_goal(
                 "goals": [{"name": "Pay off cards", "kind": "debt_payoff"}],
             }
 
+    seen = {}
+
     def scenario(*args, **kwargs):
+        seen["utility_history"] = kwargs["utility_history"]
         return {
             "plan": {
                 "schedule": [],
@@ -193,6 +283,7 @@ def test_explicit_payoff_request_returns_draft_without_saving_goal(
     assert body["goals_updated"] is False
     assert body["payoff_plan"]["monthly_budget"] == 475.0
     assert body["payoff_plan"]["safe_extra_payment"] == 400.0
+    assert seen["utility_history"]["accounts"][0]["id"] == "card"
 
 
 def test_old_payoff_request_does_not_trigger_unrelated_message(monkeypatch):
