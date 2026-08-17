@@ -26,6 +26,13 @@ def test_aggregator_get_accounts():
     assert accounts[0].is_petty_cash is True
 
 
+def test_tool_clients_allow_slow_reads_but_fail_fast_on_connect():
+    client = AggregatorClient("http://agg")
+
+    assert client._client.timeout.read == 180.0
+    assert client._client.timeout.connect == 10.0
+
+
 def test_aggregator_accepts_loan_account_type():
     # The aggregator can emit a "loan" account type; the agent must accept it
     # instead of raising a ValidationError when analyzing spending.

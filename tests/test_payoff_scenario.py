@@ -355,5 +355,5 @@ def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
     response = TestClient(service.app).post("/payoff-scenario", json={})
 
     assert response.status_code == 200
-    assert orchestrator.snapshot_days == [180, 730]
+    assert orchestrator.snapshot_days == [730, 180]
     assert seen["utility_history"] is history

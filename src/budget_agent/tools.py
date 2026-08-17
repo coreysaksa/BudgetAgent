@@ -21,11 +21,14 @@ from .models import (
     Windfall,
 )
 
-_TIMEOUT = 30.0
+_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
 
 
 class _BaseClient:
     def __init__(self, base_url: str, transport: httpx.BaseTransport | None = None) -> None:
+        # Wider transaction windows can require a live Plaid pull before the
+        # aggregator cache is populated. Keep this below the BFF's 180-second
+        # agent timeout while allowing those reads to finish.
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=_TIMEOUT,
