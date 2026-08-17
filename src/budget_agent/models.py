@@ -63,6 +63,8 @@ class GoalKind(str, Enum):
     DEBT_PAYOFF = "debt_payoff"
     # A dated event funded through discrete milestones (e.g. a trip).
     MILESTONE = "milestone"
+    # A planned purchase such as a house down payment or vehicle.
+    PURCHASE = "purchase"
 
 
 class Milestone(BaseModel):
@@ -90,6 +92,11 @@ class Goal(BaseModel):
     target_amount: float | None = None
     target_date: date | None = None
     monthly_contribution: float | None = None
+    priority: int = Field(default=3, ge=1, le=5)
+    horizon: str = "mid"  # "short" | "mid" | "long"
+    deadline_type: str = "soft"  # "hard" | "soft" | "none"
+    minimum_monthly: float | None = None
+    status: str = "active"  # "active" | "paused" | "completed"
     # Name (or id) of a savings account whose balance tracks this goal's progress.
     linked_account: str | None = None
     # For debt payoff: the account names/ids being paid down (empty = all credit).

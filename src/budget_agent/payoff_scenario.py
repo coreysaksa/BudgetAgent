@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import calendar
+import math
 from datetime import date
 from statistics import median
 from typing import Any, TypedDict
@@ -42,6 +43,142 @@ def _add_months(value: date, count: int) -> date:
     month = month_index + 1
     day = min(value.day, calendar.monthrange(year, month)[1])
     return date(year, month, day)
+
+
+def _goal_current_amount(goal: dict[str, Any], analysis: dict[str, Any]) -> float:
+    explicit = goal.get("current_amount")
+    if explicit is not None:
+        return max(0.0, float(explicit))
+    milestones = goal.get("milestones") or []
+    if milestones:
+        return round(
+            sum(max(0.0, float(item.get("funded_amount") or 0.0)) for item in milestones),
+            2,
+        )
+    linked = str(goal.get("linked_account") or "").strip().lower()
+    if linked:
+        for account in analysis.get("accounts") or []:
+            if linked in {
+                str(account.get("id") or "").strip().lower(),
+                str(account.get("name") or "").strip().lower(),
+            }:
+                return max(0.0, float(account.get("balance") or 0.0))
+    return 0.0
+
+
+def _goal_target_amount(goal: dict[str, Any]) -> float:
+    target = goal.get("target_amount")
+    if target is not None:
+        return max(0.0, float(target))
+    return round(
+        sum(max(0.0, float(item.get("amount") or 0.0)) for item in goal.get("milestones") or []),
+        2,
+    )
+
+
+def _goal_months_remaining(goal: dict[str, Any], today: date) -> int | None:
+    target_date = _parse_date(goal.get("target_date"))
+    if target_date is None:
+        dates = [
+            parsed
+            for parsed in (
+                _parse_date(item.get("due_date")) for item in goal.get("milestones") or []
+            )
+            if parsed is not None
+        ]
+        target_date = max(dates) if dates else None
+    if target_date is None:
+        return None
+    return max(1, math.ceil((target_date - today).days / 30.4375))
+
+
+def _goal_allocation_rows(
+    goals: list[dict[str, Any]],
+    analysis: dict[str, Any],
+    capacity: float,
+    debt_allocation_percent: float,
+    today: date,
+    has_debt: bool,
+) -> tuple[list[dict[str, Any]], float]:
+    rows: list[dict[str, Any]] = []
+    hard: list[dict[str, Any]] = []
+    flexible: list[dict[str, Any]] = []
+    for goal in goals:
+        kind = str(goal.get("kind") or "savings").lower()
+        status = str(goal.get("status") or "active").lower()
+        if kind == "debt_payoff" or status != "active":
+            continue
+        target = _goal_target_amount(goal)
+        current = min(target, _goal_current_amount(goal, analysis)) if target else 0.0
+        remaining = max(0.0, target - current)
+        months = _goal_months_remaining(goal, today)
+        deadline_type = str(goal.get("deadline_type") or "soft").lower()
+        configured = max(0.0, float(goal.get("monthly_contribution") or 0.0))
+        minimum = max(0.0, float(goal.get("minimum_monthly") or 0.0))
+        deadline_required = remaining / months if remaining and months else 0.0
+        required = max(minimum, deadline_required if deadline_type == "hard" else 0.0)
+        desired = max(configured, minimum, required)
+        row = {
+            "goal_id": str(goal.get("id") or ""),
+            "name": str(goal.get("name") or "Goal"),
+            "kind": kind,
+            "priority": min(5, max(1, int(goal.get("priority") or 3))),
+            "horizon": str(goal.get("horizon") or "mid"),
+            "deadline_type": deadline_type,
+            "target_amount": round(target, 2),
+            "current_amount": round(current, 2),
+            "remaining": round(remaining, 2),
+            "target_date": (
+                str(goal.get("target_date")) if goal.get("target_date") else None
+            ),
+            "required_monthly": round(required, 2),
+            "desired_monthly": round(desired, 2),
+            "planned_monthly": 0.0,
+            "projected_completion_date": None,
+            "on_track": None,
+        }
+        (hard if deadline_type == "hard" else flexible).append(row)
+
+    available = max(0.0, capacity)
+    hard.sort(key=lambda row: (row["target_date"] or "9999-12-31", row["priority"]))
+    for row in hard:
+        planned = min(available, row["desired_monthly"])
+        row["planned_monthly"] = round(planned, 2)
+        available -= planned
+        rows.append(row)
+
+    debt_extra = available * min(100.0, max(0.0, debt_allocation_percent)) / 100.0
+    flexible_capacity = available - debt_extra
+    flexible.sort(key=lambda row: (row["priority"], row["target_date"] or "9999-12-31"))
+    for row in flexible:
+        planned = min(flexible_capacity, row["desired_monthly"])
+        row["planned_monthly"] = round(planned, 2)
+        flexible_capacity -= planned
+        rows.append(row)
+    if has_debt:
+        debt_extra += flexible_capacity
+    else:
+        flexible_capacity += debt_extra
+        debt_extra = 0.0
+        for row in flexible:
+            if flexible_capacity <= 0:
+                break
+            remaining_desired = max(0.0, row["desired_monthly"] - row["planned_monthly"])
+            addition = min(flexible_capacity, remaining_desired)
+            row["planned_monthly"] = round(row["planned_monthly"] + addition, 2)
+            flexible_capacity -= addition
+
+    for row in rows:
+        planned = row["planned_monthly"]
+        remaining = row["remaining"]
+        if planned > 0 and remaining > 0:
+            completion_months = max(1, math.ceil(remaining / planned))
+            row["projected_completion_date"] = _add_months(
+                today, completion_months
+            ).isoformat()
+        if row["deadline_type"] == "hard":
+            row["on_track"] = planned + 0.01 >= row["required_monthly"]
+    return rows, round(debt_extra, 2)
 
 
 def _spending_rows(
@@ -365,10 +502,23 @@ def build_payoff_scenario(
     )
     safe_extra = max(0.0, safe_before_floor)
     allocation_percent = min(100.0, max(0.0, float(debt_allocation_percent)))
+    has_debt = any(
+        account.get("type") == "credit"
+        and abs(float(account.get("balance") or 0.0)) > 0.01
+        for account in analysis.get("accounts") or []
+    )
+    portfolio_rows, recommended_debt_extra = _goal_allocation_rows(
+        goals,
+        analysis,
+        safe_extra,
+        allocation_percent,
+        today,
+        has_debt,
+    )
     requested_extra = (
         max(0.0, float(monthly_debt_extra))
         if monthly_debt_extra is not None
-        else safe_extra * allocation_percent / 100.0
+        else recommended_debt_extra
     )
     minimum_total = sum(
         max(0.0, float(account.get("minimum_payment") or 0.0))
@@ -399,19 +549,37 @@ def build_payoff_scenario(
             + ", ".join(below_floor)
             + "."
         )
-    if requested_extra > safe_extra + 0.01:
-        reasons.append(
-            f"The requested ${requested_extra:,.2f} monthly extra payment exceeds "
-            f"the calculated safe amount of ${safe_extra:,.2f}."
-        )
+    non_debt_total = sum(row["planned_monthly"] for row in portfolio_rows)
+    if requested_extra + non_debt_total > safe_extra + 0.01:
+        if non_debt_total:
+            reasons.append(
+                f"The requested allocations total ${requested_extra + non_debt_total:,.2f} "
+                f"but the calculated safe amount is ${safe_extra:,.2f}."
+            )
+        else:
+            reasons.append(
+                f"The requested ${requested_extra:,.2f} monthly extra payment exceeds "
+                f"the calculated safe amount of ${safe_extra:,.2f}."
+            )
     if safe_before_floor < -0.01:
         reasons.append(
             f"The proposed monthly spending exceeds available cash by "
             f"${abs(safe_before_floor):,.2f}."
         )
-    if plan is None:
+    behind_goals = [
+        row["name"]
+        for row in portfolio_rows
+        if row["deadline_type"] == "hard" and row["on_track"] is False
+    ]
+    if behind_goals:
+        reasons.append(
+            "The current safe surplus cannot fully fund these hard-deadline goals: "
+            + ", ".join(behind_goals)
+            + "."
+        )
+    if plan is None and has_debt:
         reasons.append("No credit-card balances are available for this plan.")
-    elif not plan.get("feasible", True):
+    elif plan is not None and not plan.get("feasible", True):
         reasons.extend(str(item) for item in plan.get("warnings") or [])
     feasible = not reasons
     status = "feasible" if feasible else "not_feasible"
@@ -441,6 +609,60 @@ def build_payoff_scenario(
     if plan is not None:
         plan["minimum_payment_total"] = round(minimum_total, 2)
         plan["safe_extra_payment"] = round(safe_extra, 2)
+        portfolio_rows.append(
+            {
+                "goal_id": "credit-card-payoff",
+                "name": "Credit-card payoff",
+                "kind": "debt_payoff",
+                "priority": min(
+                    [
+                        min(5, max(1, int(goal.get("priority") or 1)))
+                        for goal in goals
+                        if str(goal.get("kind") or "") == "debt_payoff"
+                    ]
+                    or [1]
+                ),
+                "horizon": "short",
+                "deadline_type": "hard"
+                if any(card.get("deadline") for card in plan.get("cards") or [])
+                else "soft",
+                "target_amount": round(
+                    sum(float(card.get("starting_balance") or 0.0) for card in plan["cards"]),
+                    2,
+                ),
+                "current_amount": 0.0,
+                "remaining": round(
+                    sum(float(card.get("starting_balance") or 0.0) for card in plan["cards"]),
+                    2,
+                ),
+                "target_date": None,
+                "required_monthly": round(minimum_total, 2),
+                "desired_monthly": round(minimum_total + requested_extra, 2),
+                "planned_monthly": round(requested_extra, 2),
+                "projected_completion_date": (
+                    _add_months(today, int(plan.get("months_to_debt_free") or 0)).isoformat()
+                    if plan.get("months_to_debt_free")
+                    else None
+                ),
+                "on_track": bool(plan.get("feasible", True)),
+            }
+        )
+    total_allocated = round(non_debt_total + requested_extra, 2)
+    portfolio_plan = {
+        "safe_monthly_capacity": round(safe_extra, 2),
+        "total_allocated": total_allocated,
+        "unallocated": round(max(0.0, safe_extra - total_allocated), 2),
+        "feasible": feasible,
+        "warnings": list(reasons),
+        "allocations": sorted(
+            portfolio_rows,
+            key=lambda row: (
+                0 if row["deadline_type"] == "hard" else 1,
+                row["priority"],
+                row["target_date"] or "9999-12-31",
+            ),
+        ),
+    }
     return {
         "regular_monthly_income": round(regular_income, 2),
         "minimum_survival_budget": round(minimum_survival, 2),
@@ -468,4 +690,5 @@ def build_payoff_scenario(
         },
         "cash_flow_plan": cash_flow_plan,
         "plan": plan,
+        "portfolio_plan": portfolio_plan,
     }

@@ -156,6 +156,11 @@ def test_chat_and_plan_returns_updated_goals():
             "target_amount": 10000.0,
             "target_date": None,
             "monthly_contribution": 500.0,
+            "priority": 3,
+            "horizon": "mid",
+            "deadline_type": "soft",
+            "minimum_monthly": None,
+            "status": "active",
             "linked_account": None,
             "target_accounts": [],
             "milestones": [],
@@ -214,6 +219,11 @@ def test_chat_and_plan_drops_nameless_goals():
             "target_amount": 5000.0,
             "target_date": None,
             "monthly_contribution": None,
+            "priority": 3,
+            "horizon": "mid",
+            "deadline_type": "soft",
+            "minimum_monthly": None,
+            "status": "active",
             "linked_account": None,
             "target_accounts": [],
             "milestones": [],
@@ -235,6 +245,11 @@ def test_chat_and_plan_parses_rich_goal_fields():
                     "target_amount": 6000,
                     "target_date": "2027-06-01",
                     "monthly_contribution": 500,
+                    "priority": 2,
+                    "horizon": "short",
+                    "deadline_type": "hard",
+                    "minimum_monthly": 300,
+                    "status": "active",
                     "linked_account": "Travel Savings",
                     "milestones": [
                         {"name": "Airfare", "amount": 2000, "due_date": "2027-03-01",
@@ -254,6 +269,10 @@ def test_chat_and_plan_parses_rich_goal_fields():
     assert g["id"] == "europe-trip"
     assert g["kind"] == "milestone"
     assert g["target_date"] == "2027-06-01"
+    assert g["priority"] == 2
+    assert g["horizon"] == "short"
+    assert g["deadline_type"] == "hard"
+    assert g["minimum_monthly"] == 300
     assert g["linked_account"] == "Travel Savings"
     assert g["milestones"] == [
         {"name": "Airfare", "amount": 2000.0, "due_date": "2027-03-01",

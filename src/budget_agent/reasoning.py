@@ -34,8 +34,11 @@ class ChatClient(Protocol):
 
 
 _MISSING = object()
-_GOAL_KINDS = {"savings", "debt_payoff", "milestone"}
+_GOAL_KINDS = {"savings", "debt_payoff", "milestone", "purchase"}
 _PAYMENT_TIMINGS = {"upfront", "at_checkout"}
+_HORIZONS = {"short", "mid", "long"}
+_DEADLINE_TYPES = {"hard", "soft", "none"}
+_GOAL_STATUSES = {"active", "paused", "completed"}
 
 
 def _norm_name(name: Any) -> str:
@@ -98,6 +101,17 @@ def _merge_goal(g: dict[str, Any], prior: dict[str, Any]) -> dict[str, Any]:
     kind = pick("kind", lambda v: str(v or "savings").strip().lower(), "savings")
     if kind not in _GOAL_KINDS:
         kind = "savings"
+    horizon = pick("horizon", lambda v: str(v or "mid").strip().lower(), "mid")
+    if horizon not in _HORIZONS:
+        horizon = "mid"
+    deadline_type = pick(
+        "deadline_type", lambda v: str(v or "soft").strip().lower(), "soft"
+    )
+    if deadline_type not in _DEADLINE_TYPES:
+        deadline_type = "soft"
+    status = pick("status", lambda v: str(v or "active").strip().lower(), "active")
+    if status not in _GOAL_STATUSES:
+        status = "active"
 
     return {
         "id": _to_str(g.get("id")) or _to_str(prior.get("id")),
@@ -106,6 +120,15 @@ def _merge_goal(g: dict[str, Any], prior: dict[str, Any]) -> dict[str, Any]:
         "target_amount": pick("target_amount", _to_float, None),
         "target_date": pick("target_date", _to_str, None),
         "monthly_contribution": pick("monthly_contribution", _to_float, None),
+        "priority": pick(
+            "priority",
+            lambda v: min(5, max(1, int(_to_float(v) or 3))),
+            3,
+        ),
+        "horizon": horizon,
+        "deadline_type": deadline_type,
+        "minimum_monthly": pick("minimum_monthly", _to_float, None),
+        "status": status,
         "linked_account": pick("linked_account", _to_str, None),
         "target_accounts": pick(
             "target_accounts",

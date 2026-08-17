@@ -357,3 +357,65 @@ def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
     assert response.status_code == 200
     assert orchestrator.snapshot_days == [730, 180]
     assert seen["utility_history"] is history
+
+
+def test_portfolio_protects_hard_deadline_then_prioritizes_debt():
+    goal_date = _month(date.today(), 6)
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [
+            {
+                "id": "cards",
+                "name": "Pay off cards",
+                "kind": "debt_payoff",
+                "priority": 1,
+            },
+            {
+                "id": "wedding-trip",
+                "name": "Wedding vacation",
+                "kind": "milestone",
+                "priority": 2,
+                "horizon": "short",
+                "deadline_type": "hard",
+                "target_amount": 1200,
+                "target_date": goal_date.isoformat(),
+            },
+            {
+                "id": "house",
+                "name": "House down payment",
+                "kind": "purchase",
+                "priority": 3,
+                "horizon": "long",
+                "monthly_contribution": 50,
+            },
+        ],
+    )
+
+    portfolio = result["portfolio_plan"]
+    by_id = {row["goal_id"]: row for row in portfolio["allocations"]}
+    assert by_id["wedding-trip"]["planned_monthly"] == 200
+    assert by_id["house"]["planned_monthly"] == 0
+    assert by_id["credit-card-payoff"]["planned_monthly"] == 0
+    assert portfolio["total_allocated"] == 200
+    assert portfolio["feasible"] is True
+
+
+def test_portfolio_reports_unfunded_hard_deadline():
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [
+            {
+                "id": "trip",
+                "name": "Fixed trip",
+                "kind": "milestone",
+                "deadline_type": "hard",
+                "target_amount": 1200,
+                "target_date": _month(date.today(), 2).isoformat(),
+            }
+        ],
+    )
+
+    assert result["portfolio_plan"]["feasible"] is False
+    assert "Fixed trip" in result["portfolio_plan"]["warnings"][0]

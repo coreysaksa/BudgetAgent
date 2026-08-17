@@ -201,6 +201,11 @@ class ChatGoal(BaseModel):
     target_amount: float | None = None
     target_date: str | None = None
     monthly_contribution: float | None = None
+    priority: int = 3
+    horizon: str = "mid"
+    deadline_type: str = "soft"
+    minimum_monthly: float | None = None
+    status: str = "active"
     linked_account: str | None = None
     target_accounts: list[str] = []
     milestones: list[ChatMilestone] = []
@@ -730,7 +735,7 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
         lambda: build_payoff_scenario(
             analysis,
             cash_flow,
-            [],
+            [goal.model_dump(mode="json") for goal in req.goals],
             utility_history=utility_history,
             extra_income=(
                 None
@@ -750,7 +755,7 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
     return {
         "data_ok": True,
         "ready": (
-            scenario.get("plan") is not None
+            isinstance(scenario.get("portfolio_plan"), dict)
             and not critical
             and scenario.get("feasibility", {}).get("status") == "feasible"
         ),
