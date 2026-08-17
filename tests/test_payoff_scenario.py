@@ -164,6 +164,44 @@ def test_quarterly_income_is_applied_only_in_scheduled_months():
     assert len(payments) > 1
 
 
+def test_extra_income_remainder_is_allocated_to_savings_goals():
+    first = date.today() + timedelta(days=10)
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [
+            {
+                "id": "vacation",
+                "name": "Wedding vacation",
+                "kind": "milestone",
+                "target_amount": 2000,
+                "target_date": _month(date.today(), 8).isoformat(),
+                "deadline_type": "hard",
+            }
+        ],
+        extra_income=[
+            {
+                "name": "SCA",
+                "amount": 1200,
+                "frequency": "one_time",
+                "first_date": first.isoformat(),
+                "status": "confirmed",
+                "debt_percent": 50,
+            }
+        ],
+    )
+
+    stream = result["extra_income"][0]
+    assert stream["debt_amount_per_occurrence"] == 600
+    assert stream["savings_amount_per_occurrence"] == 600
+    assert stream["goal_allocations"] == [
+        {"goal_id": "vacation", "name": "Wedding vacation", "amount": 600}
+    ]
+    assert result["portfolio_plan"]["extra_income_to_debt"] == 600
+    assert result["portfolio_plan"]["extra_income_to_goals"] == 600
+    assert result["portfolio_plan"]["extra_income_unassigned"] == 0
+
+
 def test_unsafe_user_extra_target_is_not_feasible():
     result = build_payoff_scenario(
         _analysis(),
@@ -176,6 +214,22 @@ def test_unsafe_user_extra_target_is_not_feasible():
         "exceeds the calculated safe amount" in reason
         for reason in result["feasibility"]["reasons"]
     )
+
+
+def test_feasibility_is_unchecked_until_explicitly_requested():
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [],
+        monthly_debt_extra=2000,
+        validate_feasibility=False,
+    )
+
+    assert result["feasibility"]["status"] == "unchecked"
+    assert result["feasibility"]["feasible"] is None
+    assert result["feasibility"]["reasons"] == []
+    assert result["portfolio_plan"]["feasible"] is None
+    assert result["portfolio_plan"]["warnings"] == []
 
 
 def test_suggestions_exclude_regular_direct_deposits_and_do_not_repeat_single_income():
@@ -347,16 +401,20 @@ def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
 
     def scenario(analysis, cash_flow, goals, **kwargs):
         seen["utility_history"] = kwargs["utility_history"]
+        seen["validate_feasibility"] = kwargs["validate_feasibility"]
         return {"plan": {"schedule": []}, "feasibility": {"status": "feasible"}}
 
     monkeypatch.setattr(service, "_orchestrator", lambda: orchestrator)
     monkeypatch.setattr(service, "build_payoff_scenario", scenario)
 
-    response = TestClient(service.app).post("/payoff-scenario", json={})
+    response = TestClient(service.app).post(
+        "/payoff-scenario", json={"validate_feasibility": False}
+    )
 
     assert response.status_code == 200
     assert orchestrator.snapshot_days == [730, 180]
     assert seen["utility_history"] is history
+    assert seen["validate_feasibility"] is False
 
 
 def test_portfolio_protects_hard_deadline_then_prioritizes_debt():

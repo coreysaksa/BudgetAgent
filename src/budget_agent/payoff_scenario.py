@@ -376,7 +376,7 @@ def _income_occurrences(
         for when in dates:
             month = when.strftime("%Y-%m")
             payments[month] = payments.get(month, 0.0) + allocated
-        if status == "estimated" and dates and allocated > 0:
+        if status == "estimated" and dates and amount > 0:
             uses_estimated = True
         normalized.append(
             {
@@ -389,10 +389,130 @@ def _income_occurrences(
                 "dates": [item.isoformat() for item in custom_dates],
                 "status": status,
                 "debt_percent": round(debt_percent, 2),
+                "debt_amount_per_occurrence": round(allocated, 2),
+                "savings_amount_per_occurrence": round(amount - allocated, 2),
+                "goal_allocations": [],
+                "_all_occurrences": [item.isoformat() for item in dates],
                 "occurrences": [item.isoformat() for item in dates[:24]],
             }
         )
     return normalized, payments, uses_estimated
+
+
+def _project_goal_with_extra_income(
+    row: dict[str, Any],
+    events: list[tuple[date, float]],
+    start: date,
+) -> str | None:
+    remaining = max(0.0, float(row["remaining"]))
+    if remaining <= 0:
+        return start.isoformat()
+    monthly = max(0.0, float(row["planned_monthly"]))
+    for offset in range(121):
+        period_start = _add_months(start.replace(day=1), offset)
+        period_end = _add_months(period_start, 1)
+        if offset > 0:
+            remaining -= monthly
+        for when, amount in events:
+            if period_start <= when < period_end:
+                remaining -= amount
+                if remaining <= 0:
+                    return when.isoformat()
+        if remaining <= 0:
+            return period_start.isoformat()
+    return None
+
+
+def _allocate_extra_income_to_goals(
+    streams: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    start: date,
+) -> tuple[float, float, float]:
+    candidates = [row for row in rows if row["kind"] != "debt_payoff"]
+    remaining = {row["goal_id"]: float(row["remaining"]) for row in candidates}
+    events: dict[str, list[tuple[date, float]]] = {
+        row["goal_id"]: [] for row in candidates
+    }
+    debt_total = 0.0
+    goal_total = 0.0
+    unassigned_total = 0.0
+    for stream in streams:
+        occurrences = [
+            when
+            for when in (
+                _parse_date(item)
+                for item in stream.pop("_all_occurrences", stream["occurrences"])
+            )
+            if when is not None
+        ]
+        debt_each = float(stream["debt_amount_per_occurrence"])
+        savings_each = float(stream["savings_amount_per_occurrence"])
+        debt_total += debt_each * len(occurrences)
+        allocations: dict[str, float] = {}
+        stream_unassigned = 0.0
+        for when in occurrences:
+            available = savings_each
+            ordered = sorted(
+                candidates,
+                key=lambda row: (
+                    0 if row["deadline_type"] == "hard" else 1,
+                    row["priority"],
+                    row["target_date"] or "9999-12-31",
+                ),
+            )
+            eligible = [
+                row
+                for row in ordered
+                if remaining[row["goal_id"]] > 0
+                and (
+                    not row["target_date"]
+                    or when <= (_parse_date(row["target_date"]) or when)
+                )
+            ]
+            if not eligible:
+                eligible = [
+                    row for row in ordered if remaining[row["goal_id"]] > 0
+                ]
+            for row in eligible:
+                if available <= 0:
+                    break
+                goal_id = row["goal_id"]
+                amount = min(available, remaining[goal_id])
+                remaining[goal_id] -= amount
+                available -= amount
+                allocations[goal_id] = allocations.get(goal_id, 0.0) + amount
+                events[goal_id].append((when, amount))
+                goal_total += amount
+            stream_unassigned += available
+        stream["goal_allocations"] = [
+            {
+                "goal_id": row["goal_id"],
+                "name": row["name"],
+                "amount": round(allocations[row["goal_id"]], 2),
+            }
+            for row in candidates
+            if allocations.get(row["goal_id"], 0.0) > 0
+        ]
+        stream["unassigned_savings"] = round(stream_unassigned, 2)
+        unassigned_total += stream_unassigned
+
+    for row in candidates:
+        goal_id = row["goal_id"]
+        allocated = sum(amount for _, amount in events[goal_id])
+        row["extra_income_allocated"] = round(allocated, 2)
+        row["remaining_after_extra_income"] = round(remaining[goal_id], 2)
+        row["projected_completion_date"] = _project_goal_with_extra_income(
+            row, events[goal_id], start
+        )
+        if row["deadline_type"] == "hard" and row["target_date"]:
+            target = _parse_date(row["target_date"])
+            projected = _parse_date(row["projected_completion_date"])
+            row["on_track"] = bool(target and projected and projected <= target)
+    return (
+        round(debt_total, 2),
+        round(goal_total, 2),
+        round(unassigned_total, 2),
+    )
 
 
 def suggest_extra_income(analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -464,6 +584,7 @@ def build_payoff_scenario(
     spending_adjustments: dict[str, float] | None = None,
     debt_allocation_percent: float = 100.0,
     monthly_debt_extra: float | None = None,
+    validate_feasibility: bool = True,
 ) -> dict[str, Any]:
     """Build an editable proposal and a deterministic payoff feasibility result."""
     spending = _spending_rows(analysis, spending_adjustments or {})
@@ -529,6 +650,11 @@ def build_payoff_scenario(
         suggest_extra_income(analysis) if extra_income is None else extra_income
     )
     streams, extra_payments, uses_estimated = _income_occurrences(proposed_income, today)
+    (
+        extra_debt_total,
+        extra_goal_total,
+        extra_unassigned_total,
+    ) = _allocate_extra_income_to_goals(streams, portfolio_rows, today)
     plan = payoff_from_snapshot(
         analysis,
         goals,
@@ -581,11 +707,17 @@ def build_payoff_scenario(
         reasons.append("No credit-card balances are available for this plan.")
     elif plan is not None and not plan.get("feasible", True):
         reasons.extend(str(item) for item in plan.get("warnings") or [])
-    feasible = not reasons
-    status = "feasible" if feasible else "not_feasible"
-    if feasible and uses_estimated:
-        status = "at_risk"
-        reasons.append("The projected timeline depends on estimated extra income.")
+    calculated_feasible = not reasons
+    status = "unchecked"
+    feasible: bool | None = None
+    if validate_feasibility:
+        feasible = calculated_feasible
+        status = "feasible" if feasible else "not_feasible"
+        if feasible and uses_estimated:
+            status = "at_risk"
+            reasons.append("The projected timeline depends on estimated extra income.")
+    else:
+        reasons = []
 
     regular_income = 0.0
     scenarios = cash_flow_plan.get("scenarios") or []
@@ -654,6 +786,9 @@ def build_payoff_scenario(
         "unallocated": round(max(0.0, safe_extra - total_allocated), 2),
         "feasible": feasible,
         "warnings": list(reasons),
+        "extra_income_to_debt": extra_debt_total,
+        "extra_income_to_goals": extra_goal_total,
+        "extra_income_unassigned": extra_unassigned_total,
         "allocations": sorted(
             portfolio_rows,
             key=lambda row: (

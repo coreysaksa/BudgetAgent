@@ -284,6 +284,7 @@ class PayoffScenarioRequest(BaseModel):
     checking_buffer: float = 250.0
     goals: list[ChatGoal] = []
     use_ai_suggestions: bool = True
+    validate_feasibility: bool = True
 
 
 class MerchantCandidate(BaseModel):
@@ -626,6 +627,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                     }
                     for item in structured_windfalls
                 ],
+                validate_feasibility=False,
             )
             payoff_plan = payoff_scenario.get("plan")
             critical_questions = [
@@ -745,6 +747,7 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
             spending_adjustments=req.spending_adjustments,
             debt_allocation_percent=req.debt_allocation_percent,
             monthly_debt_extra=req.monthly_debt_extra,
+            validate_feasibility=req.validate_feasibility,
         )
     )
     critical = [
