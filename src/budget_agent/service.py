@@ -40,7 +40,7 @@ from .models import (
 from .notifications import Notifier
 from .orchestrator import Orchestrator
 from .payoff import payoff_from_snapshot
-from .payoff_scenario import build_payoff_scenario, suggest_budget_baseline
+from .payoff_scenario import build_payoff_scenario, reconcile_budget_baseline
 from .reasoning import build_reasoner
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
@@ -533,9 +533,9 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                 req.windfalls,
                 [Windfall.model_validate(item) for item in extracted["windfalls"]],
             )
-            baseline = (
-                req.budget_baseline
-                or suggest_budget_baseline(planner_analysis)
+            baseline = reconcile_budget_baseline(
+                planner_analysis,
+                req.budget_baseline,
             )
             cash_flow_plan = _orchestrator().cash_flow_plan(
                 planner_analysis,
@@ -714,9 +714,9 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
         _log.warning("utility history unavailable for payoff scenario: %s", exc)
         utility_history = None
     analysis = _guard(lambda: orchestrator.snapshot(days=180))
-    baseline = (
-        [item.model_dump(mode="json") for item in req.budget_baseline]
-        or suggest_budget_baseline(analysis)
+    baseline = reconcile_budget_baseline(
+        analysis,
+        [item.model_dump(mode="json") for item in req.budget_baseline],
     )
     cash_flow = _guard(
         lambda: orchestrator.cash_flow_plan(

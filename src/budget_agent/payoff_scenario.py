@@ -16,6 +16,16 @@ _VARIABLE_ESSENTIALS = {
     "tolls",
     "transit",
 }
+_FIXED_MANDATORY = {
+    "mortgage",
+    "rent",
+    "hoa",
+    "student_loan",
+    "loan_payment",
+    "internet",
+    "cell_phone",
+    "insurance",
+}
 _DINING = {"dining", "coffee", "delivery"}
 _FREQUENCIES = {"one_time", "monthly", "quarterly", "annual", "custom"}
 _STABLE_UTILITIES = {"internet", "cell_phone"}
@@ -188,6 +198,7 @@ def _spending_rows(
     budget_baseline: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     period_days = max(1.0, float(analysis.get("period_days") or 30.0))
+    covered_months = _complete_coverage_months(period_days)
     baseline_by_category: dict[str, float] = {}
     for item in budget_baseline or []:
         if not item.get("active", True):
@@ -202,21 +213,32 @@ def _spending_rows(
         for category in bucket.get("categories") or []:
             for subcategory in category.get("subcategories") or []:
                 key = str(subcategory.get("subcategory") or "other")
-                current = max(
-                    0.0,
-                    float(subcategory.get("total") or 0.0) * 30.0 / period_days,
+                current, estimate_confidence = _monthly_spending_estimate(
+                    subcategory,
+                    period_days=period_days,
+                    fixed=bucket_name == "mandatory" and key in _FIXED_MANDATORY,
+                    covered_months=covered_months,
                 )
                 if bucket_name == "mandatory" and key in baseline_by_category:
                     current = baseline_by_category[key]
+                    estimate_confidence = "high"
+                review_required = key == "other"
                 adjustable = (
-                    key not in _UTILITY_SUBCATEGORIES
+                    not review_required
+                    and key not in _UTILITY_SUBCATEGORIES
                     and (
                         bucket_name == "discretionary"
                         or key in _VARIABLE_ESSENTIALS
                     )
                 )
-                override_allowed = key not in _UTILITY_SUBCATEGORIES
-                minimum = current * 0.7 if key in _VARIABLE_ESSENTIALS else 0.0
+                override_allowed = (
+                    not review_required and key not in _UTILITY_SUBCATEGORIES
+                )
+                minimum = (
+                    current
+                    if review_required
+                    else current * 0.7 if key in _VARIABLE_ESSENTIALS else 0.0
+                )
                 default = current
                 if adjustable and bucket_name == "discretionary":
                     default = current * (0.75 if key in _DINING else 0.9)
@@ -242,9 +264,84 @@ def _spending_rows(
                         "override_allowed": override_allowed,
                         "override_reason": reason,
                         "override_requires_reason": override_requires_reason,
+                        "estimate_confidence": estimate_confidence,
+                        "review_required": review_required,
+                        "transaction_count": len(
+                            subcategory.get("transactions") or []
+                        ),
+                        "sample_merchants": _sample_merchants(subcategory),
                     }
                 )
     return rows
+
+
+def _monthly_spending_estimate(
+    subcategory: dict[str, Any],
+    *,
+    period_days: float,
+    fixed: bool,
+    covered_months: list[str],
+) -> tuple[float, str]:
+    monthly_totals: dict[str, float] = {}
+    for transaction in subcategory.get("transactions") or []:
+        when = _parse_date(transaction.get("date"))
+        try:
+            amount = abs(float(transaction.get("amount") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if when is None or amount <= 0:
+            continue
+        month = when.strftime("%Y-%m")
+        monthly_totals[month] = monthly_totals.get(month, 0.0) + amount
+
+    observed = list(monthly_totals.values())
+    if fixed and observed:
+        confidence = "high" if len(observed) >= 3 else "medium"
+        return round(median(observed), 2), confidence
+
+    if covered_months:
+        complete_values = [monthly_totals.get(month, 0.0) for month in covered_months]
+        confidence = "high" if len(complete_values) >= 3 else "medium"
+        return round(sum(complete_values) / len(complete_values), 2), confidence
+
+    normalized = max(
+        0.0,
+        float(subcategory.get("total") or 0.0) * 30.0 / period_days,
+    )
+    if observed and period_days <= 45:
+        return round(sum(observed), 2), "medium"
+    return round(normalized, 2), "medium" if observed else "low"
+
+
+def _complete_coverage_months(period_days: float) -> list[str]:
+    today = date.today()
+    start = date.fromordinal(
+        max(1, today.toordinal() - max(1, int(period_days)) + 1)
+    )
+    cursor = start.replace(day=1)
+    if start.day > 1:
+        cursor = _add_months(cursor, 1)
+    last = today.replace(day=1)
+    if today.day < calendar.monthrange(today.year, today.month)[1]:
+        last = _add_months(last, -1)
+    months: list[str] = []
+    while cursor <= last:
+        months.append(cursor.strftime("%Y-%m"))
+        cursor = _add_months(cursor, 1)
+    return months
+
+
+def _sample_merchants(subcategory: dict[str, Any]) -> list[str]:
+    samples: list[str] = []
+    for transaction in subcategory.get("transactions") or []:
+        merchant = str(
+            transaction.get("merchant") or transaction.get("description") or ""
+        ).strip()
+        if merchant and merchant not in samples:
+            samples.append(merchant)
+        if len(samples) == 3:
+            break
+    return samples
 
 
 def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -265,11 +362,34 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 "monthly_amount": round(float(row["current_monthly"]), 2),
                 "due_day": None,
                 "source": "inferred",
-                "confidence": "low" if variable else "medium",
+                "confidence": str(row.get("estimate_confidence") or "low"),
                 "active": True,
             }
         )
     return suggestions
+
+
+def reconcile_budget_baseline(
+    analysis: dict[str, Any],
+    budget_baseline: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Refresh inferred categories while preserving confirmed user decisions."""
+    confirmed = [
+        dict(item)
+        for item in budget_baseline or []
+        if str(item.get("source") or "inferred") == "confirmed"
+    ]
+    confirmed_categories = {
+        str(item.get("category") or "")
+        for item in confirmed
+        if item.get("active", True)
+    }
+    inferred = [
+        item
+        for item in suggest_budget_baseline(analysis)
+        if str(item.get("category") or "") not in confirmed_categories
+    ]
+    return [*confirmed, *inferred]
 
 
 def _utility_forecast(

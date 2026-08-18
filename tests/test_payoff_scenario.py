@@ -4,7 +4,12 @@ from datetime import date, timedelta
 from fastapi.testclient import TestClient
 
 from budget_agent import service
-from budget_agent.payoff_scenario import build_payoff_scenario, suggest_extra_income
+from budget_agent.payoff_scenario import (
+    build_payoff_scenario,
+    reconcile_budget_baseline,
+    suggest_budget_baseline,
+    suggest_extra_income,
+)
 
 
 def _analysis():
@@ -128,6 +133,118 @@ def _utility_history(transactions):
             }
         ],
     }
+
+
+def test_fixed_mandatory_baseline_uses_observed_monthly_median():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    mortgage = analysis["spending_tree"][0]["categories"][0]["subcategories"][0]
+    mortgage["total"] = 7890
+    mortgage["transactions"] = [
+        {
+            "date": _month(date.today(), -offset).isoformat(),
+            "amount": 2630,
+            "merchant": "Mortgage servicer",
+        }
+        for offset in range(3)
+    ]
+
+    baseline = suggest_budget_baseline(analysis)
+    mortgage_item = next(item for item in baseline if item["category"] == "mortgage")
+
+    assert mortgage_item["monthly_amount"] == 2630
+    assert mortgage_item["confidence"] == "high"
+
+
+def test_reconcile_refreshes_inferred_baseline_but_preserves_confirmed_values():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    mortgage = analysis["spending_tree"][0]["categories"][0]["subcategories"][0]
+    mortgage["total"] = 7890
+    mortgage["transactions"] = [
+        {
+            "date": _month(date.today(), -offset).isoformat(),
+            "amount": 2630,
+        }
+        for offset in range(3)
+    ]
+    stale = [
+        {
+            "id": "baseline-mortgage",
+            "name": "Mortgage",
+            "category": "mortgage",
+            "kind": "fixed",
+            "monthly_amount": 1224,
+            "source": "inferred",
+            "confidence": "medium",
+            "active": True,
+        }
+    ]
+
+    refreshed = reconcile_budget_baseline(analysis, stale)
+    assert next(
+        item for item in refreshed if item["category"] == "mortgage"
+    )["monthly_amount"] == 2630
+
+    stale[0]["source"] = "confirmed"
+    confirmed = reconcile_budget_baseline(analysis, stale)
+    assert next(
+        item for item in confirmed if item["category"] == "mortgage"
+    )["monthly_amount"] == 1224
+
+
+def test_variable_spending_averages_complete_months_from_long_history():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    dining = analysis["spending_tree"][1]["categories"][0]["subcategories"][0]
+    dining["total"] = 1400
+    dining["transactions"] = [
+        {
+            "date": _month(date.today(), -offset).isoformat(),
+            "amount": 100,
+            "merchant": "Restaurant",
+        }
+        for offset in range(1, 6)
+    ] + [
+        {
+            "date": date.today().isoformat(),
+            "amount": 900,
+            "merchant": "One-time current-month event",
+        }
+    ]
+
+    result = build_payoff_scenario(analysis, _cash_flow(), [])
+    dining_row = next(row for row in result["spending"] if row["key"] == "dining")
+
+    assert dining_row["current_monthly"] == 100
+    assert dining_row["proposed_monthly"] == 75
+    assert dining_row["estimate_confidence"] == "high"
+
+
+def test_other_spending_requires_review_and_is_not_treated_as_savings():
+    analysis = _analysis()
+    analysis["spending_tree"][1]["categories"][0]["subcategories"].append(
+        {
+            "subcategory": "other",
+            "total": 600,
+            "transactions": [
+                {
+                    "date": date.today().isoformat(),
+                    "amount": 600,
+                    "merchant": "Unknown merchant",
+                }
+            ],
+        }
+    )
+
+    result = build_payoff_scenario(analysis, _cash_flow(), [])
+    other = next(row for row in result["spending"] if row["key"] == "other")
+
+    assert other["review_required"] is True
+    assert other["adjustable"] is False
+    assert other["proposed_monthly"] == other["current_monthly"]
+    assert other["sample_merchants"] == ["Unknown merchant"]
+    assert result["spending_savings"] == 100
 
 
 def test_scenario_locks_fixed_bills_and_recommends_discretionary_cut():
