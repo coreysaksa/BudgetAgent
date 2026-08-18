@@ -114,6 +114,7 @@ class Orchestrator:
         checking_buffer: float = 250.0,
         paychecks: list[PaycheckInput] | None = None,
         necessity_overrides: list[NecessityOverride] | None = None,
+        budget_baseline: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build deterministic pay-period survival and safe debt-payment targets."""
         return self.planner.build_cash_flow_plan(
@@ -124,6 +125,7 @@ class Orchestrator:
             checking_buffer=checking_buffer,
             paychecks=paychecks,
             necessity_overrides=necessity_overrides,
+            budget_baseline=budget_baseline,
         )
 
     def plan(self, analysis, goals: list[Goal]) -> BudgetPlan:

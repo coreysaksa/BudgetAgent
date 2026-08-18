@@ -143,6 +143,44 @@ def test_scenario_locks_fixed_bills_and_recommends_discretionary_cut():
     assert result["plan"]["monthly_budget"] == 275
 
 
+def test_confirmed_baseline_drives_direct_survival_budget():
+    cash_flow = _cash_flow()
+    cash_flow["monthly_survival_budget"] = 3200
+    cash_flow["survival_budget_breakdown"] = [
+        {
+            "id": "mortgage",
+            "name": "Confirmed mortgage",
+            "category": "mortgage",
+            "monthly_amount": 2400,
+            "source": "confirmed",
+            "confidence": "high",
+        }
+    ]
+    baseline = [
+        {
+            "id": "mortgage",
+            "name": "Confirmed mortgage",
+            "category": "mortgage",
+            "kind": "fixed",
+            "monthly_amount": 2400,
+            "source": "confirmed",
+            "confidence": "high",
+            "active": True,
+        }
+    ]
+
+    result = build_payoff_scenario(
+        _analysis(),
+        cash_flow,
+        [],
+        budget_baseline=baseline,
+    )
+
+    assert result["minimum_survival_budget"] == 3200
+    assert result["budget_baseline"] == baseline
+    assert result["survival_budget_breakdown"][0]["name"] == "Confirmed mortgage"
+
+
 def test_fixed_obligation_override_updates_survival_budget():
     result = build_payoff_scenario(
         _analysis(),
@@ -197,7 +235,7 @@ def test_below_floor_override_requires_explanation():
     assert explained["minimum_survival_budget"] == 3200
 
 
-def test_quarterly_income_is_applied_only_in_scheduled_months():
+def test_quarterly_income_ignores_legacy_debt_percentage():
     first = date.today() + timedelta(days=10)
     result = build_payoff_scenario(
         _analysis(),
@@ -215,11 +253,11 @@ def test_quarterly_income_is_applied_only_in_scheduled_months():
         ],
     )
     payments = result["extra_payments_by_month"]
-    assert payments[first.strftime("%Y-%m")] == 600
+    assert payments[first.strftime("%Y-%m")] == 1200
     assert len(payments) > 1
 
 
-def test_extra_income_remainder_is_allocated_to_savings_goals():
+def test_extra_income_protects_hard_goal_shortfall_then_pays_debt():
     first = date.today() + timedelta(days=10)
     result = build_payoff_scenario(
         _analysis(),
@@ -247,13 +285,13 @@ def test_extra_income_remainder_is_allocated_to_savings_goals():
     )
 
     stream = result["extra_income"][0]
-    assert stream["debt_amount_per_occurrence"] == 600
-    assert stream["savings_amount_per_occurrence"] == 600
+    assert stream["debt_amount_per_occurrence"] == 800
+    assert stream["savings_amount_per_occurrence"] == 400
     assert stream["goal_allocations"] == [
-        {"goal_id": "vacation", "name": "Wedding vacation", "amount": 600}
+        {"goal_id": "vacation", "name": "Wedding vacation", "amount": 400}
     ]
-    assert result["portfolio_plan"]["extra_income_to_debt"] == 600
-    assert result["portfolio_plan"]["extra_income_to_goals"] == 600
+    assert result["portfolio_plan"]["extra_income_to_debt"] == 800
+    assert result["portfolio_plan"]["extra_income_to_goals"] == 400
     assert result["portfolio_plan"]["extra_income_unassigned"] == 0
 
 

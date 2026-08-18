@@ -117,6 +117,7 @@ class PlannerClient(_BaseClient):
         checking_buffer: float = 250.0,
         paychecks: list[PaycheckInput] | None = None,
         necessity_overrides: list[NecessityOverride] | None = None,
+        budget_baseline: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "as_of": as_of,
@@ -132,6 +133,7 @@ class PlannerClient(_BaseClient):
             "necessity_overrides": [
                 item.model_dump(mode="json") for item in (necessity_overrides or [])
             ],
+            "budget_baseline": budget_baseline or [],
             "checking_buffer": checking_buffer,
         }
         if as_of is None:

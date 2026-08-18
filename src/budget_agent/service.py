@@ -40,7 +40,7 @@ from .models import (
 from .notifications import Notifier
 from .orchestrator import Orchestrator
 from .payoff import payoff_from_snapshot
-from .payoff_scenario import build_payoff_scenario
+from .payoff_scenario import build_payoff_scenario, suggest_budget_baseline
 from .reasoning import build_reasoner
 from .tools import AggregatorClient, AnalyzerClient, PlannerClient
 
@@ -259,6 +259,8 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = []
     goals: list[ChatGoal] = []
     windfalls: list[Windfall] = []
+    extra_income: list[dict[str, Any]] = []
+    budget_baseline: list[dict[str, Any]] = []
     checking_buffer: float = 250.0
     payoff_plan_active: bool = False
     page_context: PageContext | None = None
@@ -276,10 +278,23 @@ class ExtraIncomeScenarioInput(BaseModel):
     debt_percent: float = 100.0
 
 
+class BudgetBaselineItemInput(BaseModel):
+    id: str
+    name: str
+    category: str
+    kind: str = "fixed"
+    monthly_amount: float = 0.0
+    due_day: int | None = Field(default=None, ge=1, le=31)
+    source: str = "inferred"
+    confidence: str = "low"
+    active: bool = True
+
+
 class PayoffScenarioRequest(BaseModel):
     extra_income: list[ExtraIncomeScenarioInput] = []
     spending_adjustments: dict[str, float] = {}
     spending_adjustment_reasons: dict[str, str] = {}
+    budget_baseline: list[BudgetBaselineItemInput] = []
     debt_allocation_percent: float = 100.0
     monthly_debt_extra: float | None = None
     checking_buffer: float = 250.0
@@ -372,13 +387,6 @@ def _requests_payoff_plan(message: str) -> bool:
             "update my credit card payoff",
         )
     )
-
-
-def _scenario_safe_extra(plan: dict[str, Any] | None) -> float:
-    scenarios = (plan or {}).get("scenarios") or []
-    if not scenarios:
-        return 0.0
-    return max(0.0, float(scenarios[0].get("safe_extra_payment") or 0.0))
 
 
 def _merge_windfalls(
@@ -525,6 +533,10 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                 req.windfalls,
                 [Windfall.model_validate(item) for item in extracted["windfalls"]],
             )
+            baseline = (
+                req.budget_baseline
+                or suggest_budget_baseline(planner_analysis)
+            )
             cash_flow_plan = _orchestrator().cash_flow_plan(
                 planner_analysis,
                 structured_windfalls,
@@ -536,6 +548,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                     NecessityOverride.model_validate(item)
                     for item in extracted["necessity_overrides"]
                 ],
+                budget_baseline=baseline,
             )
             baseline_cash_flow = _orchestrator().cash_flow_plan(
                 planner_analysis,
@@ -548,6 +561,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                     NecessityOverride.model_validate(item)
                     for item in extracted["necessity_overrides"]
                 ],
+                budget_baseline=baseline,
             )
             cash_flow_plan.setdefault("clarification_questions", []).extend(
                 {
@@ -570,65 +584,30 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                     baseline_cash_flow.get("recurring_safe_extra_payment") or 0.0
                 ),
             )
-            current_baseline_extra = _scenario_safe_extra(baseline_cash_flow)
-            confirmed_extra = _scenario_safe_extra(cash_flow_plan)
-            confirmed_windfall_total = sum(
-                item.amount
-                for item in structured_windfalls
-                if item.status == "confirmed"
-            )
-            safe_windfall_extra = max(
-                0.0, confirmed_extra - current_baseline_extra
-            )
-            confirmed_debt_percent = (
-                min(100.0, safe_windfall_extra * 100.0 / confirmed_windfall_total)
-                if confirmed_windfall_total > 0
-                else 100.0
-            )
-            estimated_windfall_total = sum(
-                item.amount
-                for item in structured_windfalls
-                if item.status == "estimated"
-            )
-            scenarios = cash_flow_plan.get("scenarios") or []
-            estimated_scenario_extra = (
-                max(
-                    0.0,
-                    float(scenarios[1].get("safe_extra_payment") or 0.0)
-                    - confirmed_extra,
-                )
-                if len(scenarios) > 1
-                else 0.0
-            )
-            estimated_debt_percent = (
-                min(
-                    100.0,
-                    estimated_scenario_extra * 100.0 / estimated_windfall_total,
-                )
-                if estimated_windfall_total > 0
-                else 100.0
-            )
             payoff_scenario = build_payoff_scenario(
                 planner_analysis,
                 baseline_cash_flow,
                 [],
                 utility_history=utility_history,
-                extra_income=[
-                    {
-                        "name": item.name,
-                        "amount": item.amount,
-                        "frequency": "one_time",
-                        "first_date": item.date.isoformat(),
-                        "status": item.status,
-                        "debt_percent": (
-                            confirmed_debt_percent
-                            if item.status == "confirmed"
-                            else estimated_debt_percent
-                        ),
-                    }
-                    for item in structured_windfalls
-                ],
+                extra_income=(
+                    req.extra_income
+                    or [
+                        {
+                            "name": item.name,
+                            "amount": item.amount,
+                            "frequency": "one_time",
+                            "first_date": item.date.isoformat(),
+                            "status": item.status,
+                        }
+                        for item in structured_windfalls
+                    ]
+                ),
+                budget_baseline=baseline,
                 validate_feasibility=False,
+            )
+            analysis["budget_baseline"] = baseline
+            analysis["extra_income_allocations"] = payoff_scenario.get(
+                "extra_income", []
             )
             payoff_plan = payoff_scenario.get("plan")
             critical_questions = [
@@ -644,7 +623,12 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                 payoff_plan["minimum_payment_total"] = round(minimum_total, 2)
                 payoff_plan["safe_extra_payment"] = round(baseline_extra, 2)
                 payoff_plan["initial_extra_payment"] = round(
-                    safe_windfall_extra, 2
+                    float(
+                        payoff_scenario.get("extra_payments_by_month", {}).get(
+                            date.today().strftime("%Y-%m"), 0.0
+                        )
+                    ),
+                    2,
                 )
                 prompt_plan = payoff_plan
                 sched = payoff_plan.get("schedule") or []
@@ -730,11 +714,16 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
         _log.warning("utility history unavailable for payoff scenario: %s", exc)
         utility_history = None
     analysis = _guard(lambda: orchestrator.snapshot(days=180))
+    baseline = (
+        [item.model_dump(mode="json") for item in req.budget_baseline]
+        or suggest_budget_baseline(analysis)
+    )
     cash_flow = _guard(
         lambda: orchestrator.cash_flow_plan(
             analysis,
             [],
             checking_buffer=req.checking_buffer,
+            budget_baseline=baseline,
         )
     )
     scenario = _guard(
@@ -750,6 +739,7 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
             ),
             spending_adjustments=req.spending_adjustments,
             spending_adjustment_reasons=req.spending_adjustment_reasons,
+            budget_baseline=baseline,
             debt_allocation_percent=req.debt_allocation_percent,
             monthly_debt_extra=req.monthly_debt_extra,
             validate_feasibility=req.validate_feasibility,

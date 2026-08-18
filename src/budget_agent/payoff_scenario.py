@@ -185,8 +185,17 @@ def _spending_rows(
     analysis: dict[str, Any],
     adjustments: dict[str, float],
     adjustment_reasons: dict[str, str],
+    budget_baseline: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     period_days = max(1.0, float(analysis.get("period_days") or 30.0))
+    baseline_by_category: dict[str, float] = {}
+    for item in budget_baseline or []:
+        if not item.get("active", True):
+            continue
+        category = str(item.get("category") or "")
+        baseline_by_category[category] = baseline_by_category.get(category, 0.0) + max(
+            0.0, float(item.get("monthly_amount") or 0.0)
+        )
     rows: list[dict[str, Any]] = []
     for bucket in analysis.get("spending_tree") or []:
         bucket_name = str(bucket.get("bucket") or "")
@@ -197,6 +206,8 @@ def _spending_rows(
                     0.0,
                     float(subcategory.get("total") or 0.0) * 30.0 / period_days,
                 )
+                if bucket_name == "mandatory" and key in baseline_by_category:
+                    current = baseline_by_category[key]
                 adjustable = (
                     key not in _UTILITY_SUBCATEGORIES
                     and (
@@ -234,6 +245,31 @@ def _spending_rows(
                     }
                 )
     return rows
+
+
+def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build editable baseline suggestions from normalized mandatory spending."""
+    rows = _spending_rows(analysis, {}, {}, None)
+    suggestions: list[dict[str, Any]] = []
+    for row in rows:
+        if row["bucket"] != "mandatory" or row["current_monthly"] <= 0:
+            continue
+        key = str(row["key"])
+        variable = key in _VARIABLE_ESSENTIALS or key in _SEASONAL_UTILITIES
+        suggestions.append(
+            {
+                "id": f"baseline-{key}",
+                "name": str(row["label"]),
+                "category": key,
+                "kind": "variable" if variable else "fixed",
+                "monthly_amount": round(float(row["current_monthly"]), 2),
+                "due_day": None,
+                "source": "inferred",
+                "confidence": "low" if variable else "medium",
+                "active": True,
+            }
+        )
+    return suggestions
 
 
 def _utility_forecast(
@@ -361,7 +397,6 @@ def _income_occurrences(
         status = str(stream.get("status") or "estimated").lower()
         if status not in {"confirmed", "estimated"}:
             status = "estimated"
-        debt_percent = min(100.0, max(0.0, float(stream.get("debt_percent") or 100.0)))
         first = _parse_date(stream.get("first_date"))
         end = _parse_date(stream.get("end_date"))
         custom_dates = [
@@ -382,10 +417,6 @@ def _income_occurrences(
                     dates.append(cursor)
                     cursor = _add_months(cursor, step)
         dates = sorted({item for item in dates if start <= item <= horizon_end})
-        allocated = amount * debt_percent / 100.0
-        for when in dates:
-            month = when.strftime("%Y-%m")
-            payments[month] = payments.get(month, 0.0) + allocated
         if status == "estimated" and dates and amount > 0:
             uses_estimated = True
         normalized.append(
@@ -398,10 +429,10 @@ def _income_occurrences(
                 "end_date": end.isoformat() if end else None,
                 "dates": [item.isoformat() for item in custom_dates],
                 "status": status,
-                "debt_percent": round(debt_percent, 2),
-                "debt_amount_per_occurrence": round(allocated, 2),
-                "savings_amount_per_occurrence": round(amount - allocated, 2),
+                "debt_amount_per_occurrence": 0.0,
+                "savings_amount_per_occurrence": 0.0,
                 "goal_allocations": [],
+                "allocation_rationale": [],
                 "_all_occurrences": [item.isoformat() for item in dates],
                 "occurrences": [item.isoformat() for item in dates[:24]],
             }
@@ -436,16 +467,23 @@ def _project_goal_with_extra_income(
 def _allocate_extra_income_to_goals(
     streams: list[dict[str, Any]],
     rows: list[dict[str, Any]],
+    analysis: dict[str, Any],
     start: date,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, dict[str, float]]:
     candidates = [row for row in rows if row["kind"] != "debt_payoff"]
     remaining = {row["goal_id"]: float(row["remaining"]) for row in candidates}
     events: dict[str, list[tuple[date, float]]] = {
         row["goal_id"]: [] for row in candidates
     }
     debt_total = 0.0
+    debt_remaining = sum(
+        abs(float(account.get("balance") or 0.0))
+        for account in analysis.get("accounts") or []
+        if account.get("type") == "credit"
+    )
     goal_total = 0.0
     unassigned_total = 0.0
+    debt_payments: dict[str, float] = {}
     for stream in streams:
         occurrences = [
             when
@@ -455,35 +493,77 @@ def _allocate_extra_income_to_goals(
             )
             if when is not None
         ]
-        debt_each = float(stream["debt_amount_per_occurrence"])
-        savings_each = float(stream["savings_amount_per_occurrence"])
-        debt_total += debt_each * len(occurrences)
+        amount_each = float(stream["amount"])
+        stream_debt = 0.0
+        stream_goal = 0.0
         allocations: dict[str, float] = {}
         stream_unassigned = 0.0
+        rationale: list[str] = []
         for when in occurrences:
-            available = savings_each
-            ordered = sorted(
-                candidates,
+            available = amount_each
+            hard = sorted(
+                [
+                    row
+                    for row in candidates
+                    if row["deadline_type"] == "hard"
+                    and remaining[row["goal_id"]] > 0
+                    and (
+                        not row["target_date"]
+                        or when <= (_parse_date(row["target_date"]) or when)
+                    )
+                ],
                 key=lambda row: (
-                    0 if row["deadline_type"] == "hard" else 1,
                     row["priority"],
                     row["target_date"] or "9999-12-31",
                 ),
             )
-            eligible = [
-                row
-                for row in ordered
-                if remaining[row["goal_id"]] > 0
-                and (
-                    not row["target_date"]
-                    or when <= (_parse_date(row["target_date"]) or when)
+            for row in hard:
+                if available <= 0:
+                    break
+                goal_id = row["goal_id"]
+                target = _parse_date(row["target_date"])
+                months_after_event = (
+                    max(0, math.ceil((target - when).days / 30.4375))
+                    if target
+                    else 0
                 )
-            ]
-            if not eligible:
-                eligible = [
-                    row for row in ordered if remaining[row["goal_id"]] > 0
-                ]
-            for row in eligible:
+                scheduled_before_deadline = (
+                    max(0.0, float(row["planned_monthly"])) * months_after_event
+                )
+                shortfall = max(
+                    0.0,
+                    remaining[goal_id] - scheduled_before_deadline,
+                )
+                amount = min(available, shortfall)
+                if amount <= 0:
+                    continue
+                remaining[goal_id] -= amount
+                available -= amount
+                allocations[goal_id] = allocations.get(goal_id, 0.0) + amount
+                events[goal_id].append((when, amount))
+                goal_total += amount
+                stream_goal += amount
+            if available > 0 and debt_remaining > 0:
+                debt_amount = min(available, debt_remaining)
+                debt_remaining -= debt_amount
+                available -= debt_amount
+                stream_debt += debt_amount
+                debt_total += debt_amount
+                month = when.strftime("%Y-%m")
+                debt_payments[month] = debt_payments.get(month, 0.0) + debt_amount
+            flexible = sorted(
+                [
+                    row
+                    for row in candidates
+                    if row["deadline_type"] != "hard"
+                    and remaining[row["goal_id"]] > 0
+                ],
+                key=lambda row: (
+                    row["priority"],
+                    row["target_date"] or "9999-12-31",
+                ),
+            )
+            for row in flexible:
                 if available <= 0:
                     break
                 goal_id = row["goal_id"]
@@ -493,7 +573,21 @@ def _allocate_extra_income_to_goals(
                 allocations[goal_id] = allocations.get(goal_id, 0.0) + amount
                 events[goal_id].append((when, amount))
                 goal_total += amount
+                stream_goal += amount
             stream_unassigned += available
+        if stream_goal > 0:
+            rationale.append("Protects fixed-date and priority goals.")
+        if stream_debt > 0:
+            rationale.append(
+                "Applies remaining funds to credit cards using the payoff engine's "
+                "interest-rate and promotional-expiration ordering."
+            )
+        if stream_unassigned > 0:
+            rationale.append("Leaves funds unassigned after current debts and goals are covered.")
+        count = max(1, len(occurrences))
+        stream["debt_amount_per_occurrence"] = round(stream_debt / count, 2)
+        stream["savings_amount_per_occurrence"] = round(stream_goal / count, 2)
+        stream["allocation_rationale"] = rationale
         stream["goal_allocations"] = [
             {
                 "goal_id": row["goal_id"],
@@ -522,6 +616,7 @@ def _allocate_extra_income_to_goals(
         round(debt_total, 2),
         round(goal_total, 2),
         round(unassigned_total, 2),
+        {month: round(amount, 2) for month, amount in debt_payments.items()},
     )
 
 
@@ -578,7 +673,6 @@ def suggest_extra_income(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 "end_date": None,
                 "dates": [],
                 "status": "estimated",
-                "debt_percent": 100.0,
             }
         )
     return suggestions
@@ -593,6 +687,7 @@ def build_payoff_scenario(
     extra_income: list[dict[str, Any]] | None = None,
     spending_adjustments: dict[str, float] | None = None,
     spending_adjustment_reasons: dict[str, str] | None = None,
+    budget_baseline: list[dict[str, Any]] | None = None,
     debt_allocation_percent: float = 100.0,
     monthly_debt_extra: float | None = None,
     validate_feasibility: bool = True,
@@ -602,6 +697,7 @@ def build_payoff_scenario(
         analysis,
         spending_adjustments or {},
         spending_adjustment_reasons or {},
+        budget_baseline,
     )
     today = date.today()
     utility_forecast = _utility_forecast(
@@ -664,12 +760,15 @@ def build_payoff_scenario(
     proposed_income = (
         suggest_extra_income(analysis) if extra_income is None else extra_income
     )
-    streams, extra_payments, uses_estimated = _income_occurrences(proposed_income, today)
+    streams, _, uses_estimated = _income_occurrences(proposed_income, today)
     (
         extra_debt_total,
         extra_goal_total,
         extra_unassigned_total,
-    ) = _allocate_extra_income_to_goals(streams, portfolio_rows, today)
+        extra_payments,
+    ) = _allocate_extra_income_to_goals(
+        streams, portfolio_rows, analysis, today
+    )
     plan = payoff_from_snapshot(
         analysis,
         goals,
@@ -748,11 +847,14 @@ def build_payoff_scenario(
             * 30.0
             / max(1.0, float(analysis.get("period_days") or 30.0))
         )
+    direct_survival = float(cash_flow_plan.get("monthly_survival_budget") or 0.0)
     minimum_survival = max(
         0.0,
-        regular_income
-        - baseline_extra
-        - essential_delta
+        (
+            direct_survival
+            if direct_survival > 0
+            else regular_income - baseline_extra - essential_delta
+        )
         + utility_reserve_increment,
     )
     if plan is not None:
@@ -829,6 +931,10 @@ def build_payoff_scenario(
         ),
         "debt_allocation_percent": round(allocation_percent, 2),
         "spending": spending,
+        "budget_baseline": budget_baseline or suggest_budget_baseline(analysis),
+        "survival_budget_breakdown": cash_flow_plan.get(
+            "survival_budget_breakdown", []
+        ),
         "utility_forecast": utility_forecast,
         "extra_income": streams,
         "extra_payments_by_month": {
