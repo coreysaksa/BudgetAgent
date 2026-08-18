@@ -48,8 +48,8 @@ class _BaseClient:
 class AggregatorClient(_BaseClient):
     """Reads accounts and transactions from the Plaid aggregator (read-only)."""
 
-    def get_accounts(self) -> list[Account]:
-        resp = self._client.get("/accounts")
+    def get_accounts(self, *, refresh: bool = False) -> list[Account]:
+        resp = self._client.get("/accounts", params={"refresh": refresh})
         resp.raise_for_status()
         return [Account.model_validate(item) for item in resp.json()]
 

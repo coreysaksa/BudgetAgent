@@ -279,6 +279,7 @@ class ExtraIncomeScenarioInput(BaseModel):
 class PayoffScenarioRequest(BaseModel):
     extra_income: list[ExtraIncomeScenarioInput] = []
     spending_adjustments: dict[str, float] = {}
+    spending_adjustment_reasons: dict[str, str] = {}
     debt_allocation_percent: float = 100.0
     monthly_debt_extra: float | None = None
     checking_buffer: float = 250.0
@@ -721,7 +722,10 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
     try:
         # Fetch the widest window first. The aggregator then serves the 180-day
         # snapshot from that cache instead of making two sequential Plaid pulls.
-        utility_history = orchestrator.snapshot(days=MAX_LOOKBACK_DAYS)
+        utility_history = orchestrator.snapshot(
+            days=MAX_LOOKBACK_DAYS,
+            refresh_accounts=True,
+        )
     except Exception as exc:  # noqa: BLE001 - current payoff analysis remains usable
         _log.warning("utility history unavailable for payoff scenario: %s", exc)
         utility_history = None
@@ -745,6 +749,7 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
                 else [item.model_dump(mode="json") for item in req.extra_income]
             ),
             spending_adjustments=req.spending_adjustments,
+            spending_adjustment_reasons=req.spending_adjustment_reasons,
             debt_allocation_percent=req.debt_allocation_percent,
             monthly_debt_extra=req.monthly_debt_extra,
             validate_feasibility=req.validate_feasibility,

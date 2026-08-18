@@ -135,11 +135,66 @@ def test_scenario_locks_fixed_bills_and_recommends_discretionary_cut():
     by_key = {row["key"]: row for row in result["spending"]}
 
     assert by_key["mortgage"]["adjustable"] is False
+    assert by_key["mortgage"]["override_allowed"] is True
     assert by_key["groceries"]["adjustable"] is True
     assert by_key["groceries"]["minimum_monthly"] == 420
     assert by_key["dining"]["proposed_monthly"] == 300
     assert result["safe_monthly_extra"] == 200
     assert result["plan"]["monthly_budget"] == 275
+
+
+def test_fixed_obligation_override_updates_survival_budget():
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [],
+        spending_adjustments={"mortgage": 2594},
+        spending_adjustment_reasons={
+            "mortgage": "Primary mortgage plus second mortgage."
+        },
+    )
+    mortgage = next(row for row in result["spending"] if row["key"] == "mortgage")
+
+    assert mortgage["proposed_monthly"] == 2594
+    assert mortgage["override_reason"] == "Primary mortgage plus second mortgage."
+    assert result["minimum_survival_budget"] == 4594
+    assert not any(
+        "Explain these overrides" in reason
+        for reason in result["feasibility"]["reasons"]
+    )
+
+
+def test_below_floor_override_requires_explanation():
+    analysis = _analysis()
+    analysis["spending_tree"][0]["categories"][0]["subcategories"].append(
+        {"subcategory": "fuel", "total": 500}
+    )
+
+    unexplained = build_payoff_scenario(
+        analysis,
+        _cash_flow(),
+        [],
+        spending_adjustments={"fuel": 200},
+    )
+    explained = build_payoff_scenario(
+        analysis,
+        _cash_flow(),
+        [],
+        spending_adjustments={"fuel": 200},
+        spending_adjustment_reasons={
+            "fuel": "A one-time forgotten auto charge was cancelled."
+        },
+    )
+
+    assert any(
+        "Explain these overrides" in reason
+        for reason in unexplained["feasibility"]["reasons"]
+    )
+    assert not any(
+        "Explain these overrides" in reason
+        for reason in explained["feasibility"]["reasons"]
+    )
+    assert explained["minimum_survival_budget"] == 3200
 
 
 def test_quarterly_income_is_applied_only_in_scheduled_months():
@@ -389,8 +444,8 @@ def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
         def __init__(self):
             self.snapshot_days = []
 
-        def snapshot(self, days=30):
-            self.snapshot_days.append(days)
+        def snapshot(self, days=30, **kwargs):
+            self.snapshot_days.append((days, kwargs))
             return _analysis() if days == 180 else history
 
         def cash_flow_plan(self, analysis, windfalls, **kwargs):
@@ -412,7 +467,10 @@ def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert orchestrator.snapshot_days == [730, 180]
+    assert orchestrator.snapshot_days == [
+        (730, {"refresh_accounts": True}),
+        (180, {}),
+    ]
     assert seen["utility_history"] is history
     assert seen["validate_feasibility"] is False
 

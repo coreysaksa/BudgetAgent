@@ -58,7 +58,13 @@ class Orchestrator:
         txns = self.aggregator.get_transactions()
         return self.analyzer.analyze(accounts, txns)
 
-    def snapshot(self, days: int = 30, month: str | None = None) -> dict[str, Any]:
+    def snapshot(
+        self,
+        days: int = 30,
+        month: str | None = None,
+        *,
+        refresh_accounts: bool = False,
+    ) -> dict[str, Any]:
         """Spending analysis enriched with a per-account summary.
 
         The analyzer output on its own omits account balances and interest
@@ -71,7 +77,7 @@ class Orchestrator:
         period) so the caller can widen it when the user asks to look further
         back; it defaults to 30 days.
         """
-        accounts = self.aggregator.get_accounts()
+        accounts = self.aggregator.get_accounts(refresh=refresh_accounts)
         txns = self.aggregator.get_transactions(days=days)
         analysis = dict(
             self.analyzer.analyze(accounts, txns, period_days=days, month=month)

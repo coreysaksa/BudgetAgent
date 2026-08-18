@@ -184,6 +184,7 @@ def _goal_allocation_rows(
 def _spending_rows(
     analysis: dict[str, Any],
     adjustments: dict[str, float],
+    adjustment_reasons: dict[str, str],
 ) -> list[dict[str, Any]]:
     period_days = max(1.0, float(analysis.get("period_days") or 30.0))
     rows: list[dict[str, Any]] = []
@@ -203,14 +204,20 @@ def _spending_rows(
                         or key in _VARIABLE_ESSENTIALS
                     )
                 )
+                override_allowed = key not in _UTILITY_SUBCATEGORIES
                 minimum = current * 0.7 if key in _VARIABLE_ESSENTIALS else 0.0
                 default = current
                 if adjustable and bucket_name == "discretionary":
                     default = current * (0.75 if key in _DINING else 0.9)
                 proposed = (
                     max(0.0, float(adjustments[key]))
-                    if key in adjustments and adjustable
+                    if key in adjustments and override_allowed
                     else default
+                )
+                reason = str(adjustment_reasons.get(key) or "").strip()
+                changed = abs(proposed - default) > 0.01
+                override_requires_reason = changed and (
+                    not adjustable or proposed + 0.01 < minimum
                 )
                 rows.append(
                     {
@@ -221,6 +228,9 @@ def _spending_rows(
                         "proposed_monthly": round(proposed, 2),
                         "minimum_monthly": round(minimum, 2),
                         "adjustable": adjustable,
+                        "override_allowed": override_allowed,
+                        "override_reason": reason,
+                        "override_requires_reason": override_requires_reason,
                     }
                 )
     return rows
@@ -582,12 +592,17 @@ def build_payoff_scenario(
     utility_history: UtilityHistorySnapshot | None = None,
     extra_income: list[dict[str, Any]] | None = None,
     spending_adjustments: dict[str, float] | None = None,
+    spending_adjustment_reasons: dict[str, str] | None = None,
     debt_allocation_percent: float = 100.0,
     monthly_debt_extra: float | None = None,
     validate_feasibility: bool = True,
 ) -> dict[str, Any]:
     """Build an editable proposal and a deterministic payoff feasibility result."""
-    spending = _spending_rows(analysis, spending_adjustments or {})
+    spending = _spending_rows(
+        analysis,
+        spending_adjustments or {},
+        spending_adjustment_reasons or {},
+    )
     today = date.today()
     utility_forecast = _utility_forecast(
         spending,
@@ -598,7 +613,7 @@ def build_payoff_scenario(
     essential_delta = sum(
         row["current_monthly"] - row["proposed_monthly"]
         for row in spending
-        if row["adjustable"] and row["bucket"] == "mandatory"
+        if row["override_allowed"] and row["bucket"] == "mandatory"
     )
     proposed_discretionary = sum(
         row["proposed_monthly"]
@@ -663,16 +678,15 @@ def build_payoff_scenario(
         start=today,
     )
     reasons: list[str] = []
-    below_floor = [
+    unexplained_overrides = [
         row["label"]
         for row in spending
-        if row["adjustable"]
-        and row["proposed_monthly"] + 0.01 < row["minimum_monthly"]
+        if row["override_requires_reason"] and not row["override_reason"]
     ]
-    if below_floor:
+    if unexplained_overrides:
         reasons.append(
-            "These essential budgets are below their safe floor: "
-            + ", ".join(below_floor)
+            "Explain these overrides before relying on the lower budget: "
+            + ", ".join(unexplained_overrides)
             + "."
         )
     non_debt_total = sum(row["planned_monthly"] for row in portfolio_rows)
@@ -736,7 +750,10 @@ def build_payoff_scenario(
         )
     minimum_survival = max(
         0.0,
-        regular_income - baseline_extra + utility_reserve_increment,
+        regular_income
+        - baseline_extra
+        - essential_delta
+        + utility_reserve_increment,
     )
     if plan is not None:
         plan["minimum_payment_total"] = round(minimum_total, 2)

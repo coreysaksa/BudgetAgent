@@ -113,6 +113,27 @@ def test_snapshot_threads_days_to_transactions_and_analyzer():
     assert captured["period_days"] == 90
 
 
+def test_snapshot_can_request_fresh_account_balances():
+    captured: dict[str, str | None] = {}
+
+    def agg_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts":
+            captured["refresh"] = request.url.params.get("refresh")
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[])
+
+    orch = Orchestrator(
+        aggregator=_client(AggregatorClient, agg_handler),
+        analyzer=_client(AnalyzerClient, lambda r: httpx.Response(200, json={})),
+        planner=_client(PlannerClient, lambda r: httpx.Response(200, json={})),
+        policy=ApprovalPolicy(require_approval=True),
+    )
+
+    orch.snapshot(refresh_accounts=True)
+
+    assert captured["refresh"] == "true"
+
+
 def test_recommend_is_read_only_and_proposes_topup():
     orch = _build()
     goals = [Goal(id="g1", name="Vacation", target_amount=1000.0)]
