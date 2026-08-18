@@ -11,6 +11,7 @@ The model client is injected (``Protocol``) so tests run without a live endpoint
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from typing import Any, Protocol
 
@@ -405,9 +406,11 @@ class Reasoner:
                 "reply": raw,
                 "goals_updated": False,
                 "goals": current_goals,
+                "category_actions": [],
             }
 
         reply = str(data.get("reply") or "")
+        category_actions = _parse_category_actions(data.get("category_actions"))
         goals_updated = bool(data.get("goals_updated"))
         goals_raw = data.get("goals")
         if not goals_updated or not isinstance(goals_raw, list):
@@ -415,6 +418,7 @@ class Reasoner:
                 "reply": reply,
                 "goals_updated": False,
                 "goals": current_goals,
+                "category_actions": category_actions,
             }
 
         # Index current goals by id and by normalized name so we can preserve ids
@@ -437,7 +441,45 @@ class Reasoner:
             "reply": reply,
             "goals_updated": True,
             "goals": goals,
+            "category_actions": category_actions,
         }
+
+
+def _category_slug(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return text.strip("_")[:64]
+
+
+def _parse_category_actions(value: Any) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return actions
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        merchant = str(item.get("merchant") or "").strip()[:160]
+        subcategory = _category_slug(item.get("subcategory"))
+        bucket = str(item.get("bucket") or "").strip().lower()
+        category_group = _category_slug(item.get("category_group"))
+        label = str(item.get("label") or "").strip()[:80]
+        if (
+            not merchant
+            or not subcategory
+            or bucket not in {"mandatory", "discretionary"}
+            or not category_group
+        ):
+            continue
+        actions.append(
+            {
+                "merchant": merchant,
+                "subcategory": subcategory,
+                "bucket": bucket,
+                "category_group": category_group,
+                "label": label or subcategory.replace("_", " ").title(),
+                "custom": bool(item.get("custom")),
+            }
+        )
+    return actions
 
 
 def build_reasoner(settings: Settings) -> Reasoner | None:

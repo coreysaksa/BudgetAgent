@@ -185,6 +185,47 @@ def test_chat_and_plan_leaves_goals_unchanged_for_questions():
     assert out["goals"] == current
 
 
+def test_chat_and_plan_returns_validated_category_actions_without_goal_changes():
+    reply = json.dumps(
+        {
+            "reply": "I will categorize those subscriptions.",
+            "goals_updated": False,
+            "goals": [],
+            "category_actions": [
+                {
+                    "merchant": "Peloton",
+                    "subcategory": "Fitness Subscriptions",
+                    "bucket": "discretionary",
+                    "category_group": "Health & Fitness",
+                    "label": "Fitness Subscriptions",
+                    "custom": False,
+                },
+                {
+                    "merchant": "",
+                    "subcategory": "invalid",
+                    "bucket": "discretionary",
+                    "category_group": "other",
+                    "label": "Invalid",
+                },
+            ],
+        }
+    )
+    reasoner = Reasoner(_FakeChat(reply), deployment="gpt-4o-mini")
+
+    out = reasoner.chat_and_plan("Categorize Peloton", current_goals=[])
+
+    assert out["category_actions"] == [
+        {
+            "merchant": "Peloton",
+            "subcategory": "fitness_subscriptions",
+            "bucket": "discretionary",
+            "category_group": "health_fitness",
+            "label": "Fitness Subscriptions",
+            "custom": False,
+        }
+    ]
+
+
 def test_chat_and_plan_handles_non_json_gracefully():
     current = [{"name": "Vacation", "target_amount": 3000}]
     reasoner = Reasoner(_FakeChat("oops not json"), deployment="gpt-4o-mini")

@@ -366,6 +366,46 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 "active": True,
             }
         )
+    existing = {str(item["category"]) for item in suggestions}
+    debt_groups: dict[str, list[dict[str, Any]]] = {}
+    for payment in analysis.get("debt_service_outflows") or []:
+        category = str(payment.get("category") or "")
+        if category not in {"mortgage payment", "loan payment"}:
+            continue
+        debt_groups.setdefault(category, []).append(payment)
+    period_days = max(1.0, float(analysis.get("period_days") or 30.0))
+    for payment_category, transactions in debt_groups.items():
+        category = (
+            "mortgage" if payment_category == "mortgage payment" else "loan_payment"
+        )
+        if category in existing:
+            continue
+        monthly, confidence = _monthly_spending_estimate(
+            {
+                "total": sum(
+                    abs(float(item.get("amount") or 0.0)) for item in transactions
+                ),
+                "transactions": transactions,
+            },
+            period_days=period_days,
+            fixed=True,
+            covered_months=_complete_coverage_months(period_days),
+        )
+        if monthly <= 0:
+            continue
+        suggestions.append(
+            {
+                "id": f"baseline-{category}",
+                "name": "Mortgage" if category == "mortgage" else "Loan payment",
+                "category": category,
+                "kind": "fixed",
+                "monthly_amount": monthly,
+                "due_day": None,
+                "source": "inferred",
+                "confidence": confidence,
+                "active": True,
+            }
+        )
     return suggestions
 
 

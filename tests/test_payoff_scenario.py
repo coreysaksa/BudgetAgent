@@ -156,6 +156,30 @@ def test_fixed_mandatory_baseline_uses_observed_monthly_median():
     assert mortgage_item["confidence"] == "high"
 
 
+def test_mortgage_debt_service_cash_outflow_becomes_baseline_item():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    analysis["spending_tree"][0]["categories"][0]["subcategories"] = [
+        item
+        for item in analysis["spending_tree"][0]["categories"][0]["subcategories"]
+        if item["subcategory"] != "mortgage"
+    ]
+    analysis["debt_service_outflows"] = [
+        {
+            "date": _month(date.today(), -offset).isoformat(),
+            "amount": 2630,
+            "category": "mortgage payment",
+        }
+        for offset in range(3)
+    ]
+
+    baseline = suggest_budget_baseline(analysis)
+    mortgage_item = next(item for item in baseline if item["category"] == "mortgage")
+
+    assert mortgage_item["monthly_amount"] == 2630
+    assert mortgage_item["kind"] == "fixed"
+
+
 def test_reconcile_refreshes_inferred_baseline_but_preserves_confirmed_values():
     analysis = _analysis()
     analysis["period_days"] = 180
