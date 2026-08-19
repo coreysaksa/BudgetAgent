@@ -22,6 +22,11 @@ def _build(policy=None):
                      "balance": 100.0, "is_petty_cash": True},
                     {"id": "cc", "name": "Rewards Card", "type": "credit",
                      "balance": -640.0, "apr": 19.99,
+                     "minimum_payment": 35.0, "due_day": 18,
+                     "statement_date": "2026-08-01",
+                     "statement_balance": 620.0,
+                     "liability_override_source": "statement",
+                     "liability_status": "current",
                      "promos": [{"promo_type": "balance_transfer", "apr": 0.0,
                                  "end_date": "2026-12-01", "balance": 500.0}]},
                 ],
@@ -77,7 +82,12 @@ def test_snapshot_enriches_analysis_with_account_balances_and_apr():
     assert card["balance"] == -640.0
     assert card["type"] == "credit"
     assert card["apr"] == 19.99
-    assert card["minimum_payment"] is None
+    assert card["minimum_payment"] == 35
+    assert card["due_day"] == 18
+    assert card["statement_date"] == "2026-08-01"
+    assert card["statement_balance"] == 620
+    assert card["minimum_payment_source"] == "statement"
+    assert card["minimum_payment_status"] == "current"
     # Promotional rates flow through so the chat/plan layer can steer payoff.
     assert card["promos"] == [
         {"promo_type": "balance_transfer", "apr": 0.0,

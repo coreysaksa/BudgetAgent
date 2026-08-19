@@ -90,6 +90,23 @@ class Orchestrator:
                 "balance": a.balance,
                 "apr": a.apr,
                 "minimum_payment": a.minimum_payment,
+                "due_day": a.due_day,
+                "payment_due_date": (
+                    a.payment_due_date.isoformat() if a.payment_due_date else None
+                ),
+                "statement_date": (
+                    a.statement_date.isoformat() if a.statement_date else None
+                ),
+                "statement_balance": a.statement_balance,
+                "minimum_payment_source": (
+                    a.liability_override_source or a.minimum_payment_source
+                ),
+                "minimum_payment_status": (
+                    a.liability_status or a.minimum_payment_status
+                ),
+                "confirmed_at": (
+                    a.liability_override_confirmed_at or a.confirmed_at
+                ),
                 "promos": [
                     {
                         "promo_type": p.promo_type,

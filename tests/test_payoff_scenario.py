@@ -156,6 +156,66 @@ def test_fixed_mandatory_baseline_uses_observed_monthly_median():
     assert mortgage_item["confidence"] == "high"
 
 
+def test_sparse_insurance_becomes_reviewable_six_month_sinking_fund():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    analysis["spending_tree"][0]["categories"].append(
+        {
+            "category": "insurance",
+            "subcategories": [
+                {
+                    "subcategory": "insurance",
+                    "total": 555,
+                    "transactions": [
+                        {
+                            "date": date.today().isoformat(),
+                            "amount": 555,
+                            "merchant": "Auto insurer",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    baseline = suggest_budget_baseline(analysis)
+    insurance = next(item for item in baseline if item["category"] == "insurance")
+
+    assert insurance["kind"] == "periodic"
+    assert insurance["periodic_amount"] == 555
+    assert insurance["frequency_months"] == 6
+    assert insurance["monthly_amount"] == 92.5
+    assert insurance["review_required"] is True
+    assert insurance["confidence"] == "low"
+
+
+def test_confirmed_periodic_reserve_uses_due_date_and_reserved_balance():
+    analysis = _analysis()
+    today = date.today()
+    due = _month(today, 3)
+    baseline = [
+        {
+            "id": "insurance",
+            "name": "Car insurance",
+            "category": "insurance",
+            "kind": "periodic",
+            "monthly_amount": 0,
+            "periodic_amount": 555,
+            "frequency_months": 6,
+            "next_due_date": due.isoformat(),
+            "reserved_balance": 255,
+            "source": "confirmed",
+            "confidence": "high",
+            "active": True,
+        }
+    ]
+
+    reconciled = reconcile_budget_baseline(analysis, baseline)
+
+    assert reconciled[0]["monthly_amount"] == 100
+    assert reconciled[0]["periodic_amount"] == 555
+
+
 def test_mortgage_debt_service_cash_outflow_becomes_baseline_item():
     analysis = _analysis()
     analysis["period_days"] = 180
@@ -396,6 +456,25 @@ def test_quarterly_income_ignores_legacy_debt_percentage():
     payments = result["extra_payments_by_month"]
     assert payments[first.strftime("%Y-%m")] == 1200
     assert len(payments) > 1
+
+
+def test_missing_card_minimum_requires_confirmation_for_feasibility():
+    analysis = _analysis()
+    analysis["accounts"][0]["minimum_payment"] = None
+    analysis["accounts"][0]["minimum_payment_status"] = "missing"
+
+    result = build_payoff_scenario(
+        analysis,
+        _cash_flow(),
+        [],
+        validate_feasibility=True,
+    )
+
+    assert result["feasibility"]["status"] == "at_risk"
+    assert any(
+        "Confirm the minimum payment for: Rewards Card" in reason
+        for reason in result["feasibility"]["reasons"]
+    )
 
 
 def test_extra_income_protects_hard_goal_shortfall_then_pays_debt():

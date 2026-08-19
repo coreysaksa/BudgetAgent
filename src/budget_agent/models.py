@@ -42,6 +42,16 @@ class Account(BaseModel):
     # None when unknown; sourced from parsed statements / credit reports.
     apr: float | None = None
     minimum_payment: float | None = None
+    due_day: int | None = None
+    payment_due_date: date | None = None
+    statement_date: date | None = None
+    statement_balance: float | None = None
+    liability_override_source: str | None = None
+    liability_override_confirmed_at: str | None = None
+    liability_status: str | None = None
+    minimum_payment_source: str | None = None
+    minimum_payment_status: str | None = None
+    confirmed_at: str | None = None
     # Promotional / introductory / balance-transfer rates on this account, each
     # with its own rate, subject balance, and expiry date.
     promos: list[Promo] = Field(default_factory=list)

@@ -313,6 +313,80 @@ def _monthly_spending_estimate(
     return round(normalized, 2), "medium" if observed else "low"
 
 
+def _periodic_contribution(
+    amount: float,
+    *,
+    frequency_months: int | None,
+    next_due_date: str | None,
+    reserved_balance: float,
+    today: date | None = None,
+) -> float:
+    remaining = max(0.0, amount - max(0.0, reserved_balance))
+    start = today or date.today()
+    due = _parse_date(next_due_date)
+    months = 0
+    if due is not None:
+        months = (due.year - start.year) * 12 + due.month - start.month
+    if months <= 0:
+        months = max(1, int(frequency_months or 1))
+    return round(remaining / months, 2)
+
+
+def _periodic_insurance_profile(
+    subcategory: dict[str, Any],
+    *,
+    period_days: float,
+) -> dict[str, Any] | None:
+    monthly_totals: dict[str, float] = {}
+    dates: list[date] = []
+    for transaction in subcategory.get("transactions") or []:
+        when = _parse_date(transaction.get("date"))
+        try:
+            amount = abs(float(transaction.get("amount") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if when is None or amount <= 0:
+            continue
+        dates.append(when)
+        month = when.strftime("%Y-%m")
+        monthly_totals[month] = monthly_totals.get(month, 0.0) + amount
+    if not monthly_totals:
+        return None
+    dates.sort()
+    frequency_months: int | None = None
+    confidence = "low"
+    review_required = True
+    if len(dates) >= 2:
+        gaps = [
+            max(1, round((later - earlier).days / 30))
+            for earlier, later in zip(dates, dates[1:])
+        ]
+        typical_gap = int(round(median(gaps)))
+        if typical_gap >= 2:
+            frequency_months = typical_gap
+            confidence = "high" if len(gaps) >= 2 else "medium"
+            review_required = confidence != "high"
+    elif period_days >= 120:
+        # Semiannual is a common insurance cadence, but one observed renewal is
+        # not enough evidence to make it authoritative.
+        frequency_months = 6
+    if frequency_months is None:
+        return None
+    periodic_amount = round(median(list(monthly_totals.values())), 2)
+    return {
+        "periodic_amount": periodic_amount,
+        "frequency_months": frequency_months,
+        "monthly_amount": _periodic_contribution(
+            periodic_amount,
+            frequency_months=frequency_months,
+            next_due_date=None,
+            reserved_balance=0.0,
+        ),
+        "confidence": confidence,
+        "review_required": review_required,
+    }
+
+
 def _complete_coverage_months(period_days: float) -> list[str]:
     today = date.today()
     start = date.fromordinal(
@@ -352,17 +426,55 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
         if row["bucket"] != "mandatory" or row["current_monthly"] <= 0:
             continue
         key = str(row["key"])
+        subcategory = next(
+            (
+                sub
+                for bucket in analysis.get("spending_tree") or []
+                for category in bucket.get("categories") or []
+                for sub in category.get("subcategories") or []
+                if str(sub.get("subcategory") or "") == key
+            ),
+            None,
+        )
+        periodic = (
+            _periodic_insurance_profile(
+                subcategory,
+                period_days=max(1.0, float(analysis.get("period_days") or 30.0)),
+            )
+            if key == "insurance" and subcategory is not None
+            else None
+        )
         variable = key in _VARIABLE_ESSENTIALS or key in _SEASONAL_UTILITIES
         suggestions.append(
             {
                 "id": f"baseline-{key}",
                 "name": str(row["label"]),
                 "category": key,
-                "kind": "variable" if variable else "fixed",
-                "monthly_amount": round(float(row["current_monthly"]), 2),
+                "kind": (
+                    "periodic" if periodic else "variable" if variable else "fixed"
+                ),
+                "monthly_amount": (
+                    periodic["monthly_amount"]
+                    if periodic
+                    else round(float(row["current_monthly"]), 2)
+                ),
                 "due_day": None,
+                "periodic_amount": periodic["periodic_amount"] if periodic else None,
+                "frequency_months": (
+                    periodic["frequency_months"] if periodic else None
+                ),
+                "next_due_date": None,
+                "reserved_balance": 0.0,
+                "funding_account_id": None,
+                "review_required": (
+                    periodic["review_required"] if periodic else False
+                ),
                 "source": "inferred",
-                "confidence": str(row.get("estimate_confidence") or "low"),
+                "confidence": (
+                    periodic["confidence"]
+                    if periodic
+                    else str(row.get("estimate_confidence") or "low")
+                ),
                 "active": True,
             }
         )
@@ -414,11 +526,27 @@ def reconcile_budget_baseline(
     budget_baseline: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     """Refresh inferred categories while preserving confirmed user decisions."""
-    confirmed = [
-        dict(item)
-        for item in budget_baseline or []
-        if str(item.get("source") or "inferred") == "confirmed"
-    ]
+    confirmed: list[dict[str, Any]] = []
+    for existing in budget_baseline or []:
+        if str(existing.get("source") or "inferred") != "confirmed":
+            continue
+        item = dict(existing)
+        if str(item.get("kind") or "") == "periodic":
+            item["monthly_amount"] = _periodic_contribution(
+                max(0.0, float(item.get("periodic_amount") or 0.0)),
+                frequency_months=(
+                    int(item["frequency_months"])
+                    if item.get("frequency_months")
+                    else None
+                ),
+                next_due_date=(
+                    str(item["next_due_date"]) if item.get("next_due_date") else None
+                ),
+                reserved_balance=max(
+                    0.0, float(item.get("reserved_balance") or 0.0)
+                ),
+            )
+        confirmed.append(item)
     confirmed_categories = {
         str(item.get("category") or "")
         for item in confirmed
@@ -937,6 +1065,23 @@ def build_payoff_scenario(
         start=today,
     )
     reasons: list[str] = []
+    advisories: list[str] = []
+    unconfirmed_minimums = [
+        str(account.get("name") or "Credit card")
+        for account in analysis.get("accounts") or []
+        if account.get("type") == "credit"
+        and (
+            account.get("minimum_payment") is None
+            or str(account.get("minimum_payment_status") or "").lower()
+            in {"missing", "estimated"}
+        )
+    ]
+    if unconfirmed_minimums:
+        advisories.append(
+            "Confirm the minimum payment for: "
+            + ", ".join(unconfirmed_minimums)
+            + ". Upload a current statement or enter it manually."
+        )
     unexplained_overrides = [
         row["label"]
         for row in spending
@@ -986,8 +1131,10 @@ def build_payoff_scenario(
     if validate_feasibility:
         feasible = calculated_feasible
         status = "feasible" if feasible else "not_feasible"
-        if feasible and uses_estimated:
+        if feasible and (uses_estimated or advisories):
             status = "at_risk"
+        reasons.extend(advisories)
+        if feasible and uses_estimated:
             reasons.append("The projected timeline depends on estimated extra income.")
     else:
         reasons = []
