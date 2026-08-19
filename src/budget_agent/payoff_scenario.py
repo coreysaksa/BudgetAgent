@@ -21,6 +21,16 @@ _FREQUENCIES = {"one_time", "monthly", "quarterly", "annual", "custom"}
 _STABLE_UTILITIES = {"internet", "cell_phone"}
 _SEASONAL_UTILITIES = {"electric", "gas_utility", "water"}
 _UTILITY_SUBCATEGORIES = _STABLE_UTILITIES | _SEASONAL_UTILITIES
+_TRANSACTION_PAYMENT_BASELINE_CATEGORIES = {
+    "credit_card_payment",
+    "credit_card_payments",
+    "credit_card_interest",
+}
+_SPENDING_LABELS = {
+    "hoa": "HOA",
+    "hoa_fees": "HOA fees",
+    "car_loans": "Car payment",
+}
 
 
 class UtilityHistorySnapshot(TypedDict, total=False):
@@ -242,7 +252,9 @@ def _spending_rows(
                 rows.append(
                     {
                         "key": key,
-                        "label": key.replace("_", " ").title(),
+                        "label": _SPENDING_LABELS.get(
+                            key, key.replace("_", " ").title()
+                        ),
                         "bucket": bucket_name,
                         "current_monthly": round(current, 2),
                         "proposed_monthly": round(proposed, 2),
@@ -378,6 +390,52 @@ def _sample_merchants(subcategory: dict[str, Any]) -> list[str]:
     return samples
 
 
+def _debt_service_baseline_suggestions(
+    analysis: dict[str, Any],
+    existing_categories: set[str],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for payment in analysis.get("debt_service_outflows") or []:
+        payment_category = str(payment.get("category") or "")
+        if payment_category not in {"mortgage payment", "loan payment"}:
+            continue
+        category = (
+            "mortgage" if payment_category == "mortgage payment" else "loan_payment"
+        )
+        if category in existing_categories:
+            continue
+        groups.setdefault(category, []).append(payment)
+
+    period_days = max(1.0, float(analysis.get("period_days") or 30.0))
+    suggestions: list[dict[str, Any]] = []
+    for category, transactions in groups.items():
+        monthly, confidence = _monthly_spending_estimate(
+            {
+                "total": sum(
+                    abs(float(item.get("amount") or 0.0)) for item in transactions
+                ),
+                "transactions": transactions,
+            },
+            period_days=period_days,
+        )
+        if monthly <= 0:
+            continue
+        suggestions.append(
+            {
+                "id": f"baseline-{category}-observed",
+                "name": "Mortgage" if category == "mortgage" else "Loan payment",
+                "category": category,
+                "kind": "fixed",
+                "monthly_amount": monthly,
+                "due_day": None,
+                "source": "inferred",
+                "confidence": confidence,
+                "active": True,
+            }
+        )
+    return suggestions
+
+
 def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     """Build editable baseline suggestions from normalized mandatory spending."""
     rows = _spending_rows(analysis, {}, {}, None)
@@ -386,6 +444,8 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
         if row["bucket"] != "mandatory" or row["current_monthly"] <= 0:
             continue
         key = str(row["key"])
+        if key in _TRANSACTION_PAYMENT_BASELINE_CATEGORIES:
+            continue
         subcategory = next(
             (
                 sub
@@ -439,43 +499,7 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     existing = {str(item["category"]) for item in suggestions}
-    debt_groups: dict[str, list[dict[str, Any]]] = {}
-    for payment in analysis.get("debt_service_outflows") or []:
-        category = str(payment.get("category") or "")
-        if category not in {"mortgage payment", "loan payment"}:
-            continue
-        debt_groups.setdefault(category, []).append(payment)
-    period_days = max(1.0, float(analysis.get("period_days") or 30.0))
-    for payment_category, transactions in debt_groups.items():
-        category = (
-            "mortgage" if payment_category == "mortgage payment" else "loan_payment"
-        )
-        if category in existing:
-            continue
-        monthly, confidence = _monthly_spending_estimate(
-            {
-                "total": sum(
-                    abs(float(item.get("amount") or 0.0)) for item in transactions
-                ),
-                "transactions": transactions,
-            },
-            period_days=period_days,
-        )
-        if monthly <= 0:
-            continue
-        suggestions.append(
-            {
-                "id": f"baseline-{category}",
-                "name": "Mortgage" if category == "mortgage" else "Loan payment",
-                "category": category,
-                "kind": "fixed",
-                "monthly_amount": monthly,
-                "due_day": None,
-                "source": "inferred",
-                "confidence": confidence,
-                "active": True,
-            }
-        )
+    suggestions.extend(_debt_service_baseline_suggestions(analysis, existing))
     return suggestions
 
 
@@ -484,11 +508,28 @@ def reconcile_budget_baseline(
     budget_baseline: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     """Refresh inferred categories while preserving confirmed user decisions."""
+    suggested = suggest_budget_baseline(analysis)
+    observed_debt_categories = {
+        category
+        for category in {"mortgage", "loan_payment"}
+        if any(
+            str(item.get("id") or "") == f"baseline-{category}-observed"
+            for item in suggested
+        )
+    }
     confirmed: list[dict[str, Any]] = []
     for existing in budget_baseline or []:
         if str(existing.get("source") or "inferred") != "confirmed":
             continue
         item = dict(existing)
+        category = str(item.get("category") or "")
+        if category in _TRANSACTION_PAYMENT_BASELINE_CATEGORIES:
+            continue
+        if (
+            category in observed_debt_categories
+            and str(item.get("id") or "") == f"baseline-{category}"
+        ):
+            continue
         if str(item.get("kind") or "") == "periodic":
             item["monthly_amount"] = _periodic_contribution(
                 max(0.0, float(item.get("periodic_amount") or 0.0)),
@@ -510,11 +551,16 @@ def reconcile_budget_baseline(
         for item in confirmed
         if item.get("active", True)
     }
-    inferred = [
-        item
-        for item in suggest_budget_baseline(analysis)
-        if str(item.get("category") or "") not in confirmed_categories
-    ]
+    confirmed_ids = {str(item.get("id") or "") for item in confirmed}
+    inferred = []
+    for item in suggested:
+        item_id = str(item.get("id") or "")
+        category = str(item.get("category") or "")
+        if item_id in confirmed_ids:
+            continue
+        if item_id == f"baseline-{category}" and category in confirmed_categories:
+            continue
+        inferred.append(item)
     return [*confirmed, *inferred]
 
 
@@ -1041,6 +1087,21 @@ def build_payoff_scenario(
             "Confirm the minimum payment for: "
             + ", ".join(unconfirmed_minimums)
             + ". Upload a current statement or enter it manually."
+        )
+    uncategorized = [
+        row
+        for row in spending
+        if row["review_required"] and row["current_monthly"] > 0
+    ]
+    if uncategorized:
+        advisories.append(
+            "Classify uncategorized spending before relying on this survivable "
+            "budget: "
+            + ", ".join(
+                f"{row['label']} (${row['current_monthly']:,.2f}/month)"
+                for row in uncategorized
+            )
+            + "."
         )
     unexplained_overrides = [
         row["label"]

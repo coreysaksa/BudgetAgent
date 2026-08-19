@@ -270,6 +270,121 @@ def test_mortgage_debt_service_cash_outflow_becomes_baseline_item():
     assert mortgage_item["kind"] == "fixed"
 
 
+def test_multiple_mortgages_roll_up_to_total_observed_housing_payment():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    analysis["spending_tree"][0]["categories"][0]["subcategories"] = [
+        item
+        for item in analysis["spending_tree"][0]["categories"][0]["subcategories"]
+        if item["subcategory"] != "mortgage"
+    ]
+    analysis["debt_service_outflows"] = [
+        {
+            "date": _month(date.today(), -offset).isoformat(),
+            "amount": amount,
+            "category": "mortgage payment",
+            "merchant": merchant,
+        }
+        for offset in range(3)
+        for merchant, amount in (
+            ("Rocket Mortgage", 1844.35),
+            ("Shellpoint Mortgage Servicing", 785.96),
+        )
+    ]
+
+    baseline = suggest_budget_baseline(analysis)
+    mortgage = next(item for item in baseline if item["category"] == "mortgage")
+
+    assert mortgage["name"] == "Mortgage"
+    assert mortgage["monthly_amount"] == 2630.31
+
+
+def test_same_loan_servicer_description_variants_roll_up():
+    analysis = _analysis()
+    analysis["debt_service_outflows"] = [
+        {
+            "date": _month(date.today(), -1).isoformat(),
+            "amount": 79.91,
+            "category": "loan payment",
+            "merchant": "Goodleap Servici",
+        },
+        {
+            "date": date.today().isoformat(),
+            "amount": 79.91,
+            "category": "loan payment",
+            "merchant": "Goodleap",
+        },
+    ]
+
+    baseline = suggest_budget_baseline(analysis)
+    loans = [item for item in baseline if item["category"] == "loan_payment"]
+
+    assert len(loans) == 1
+    assert loans[0]["monthly_amount"] == 79.91
+
+
+def test_card_payments_and_interest_are_replaced_by_account_minimums():
+    analysis = _analysis()
+    analysis["spending_tree"][0]["categories"].append(
+        {
+            "category": "debt",
+            "subcategories": [
+                {"subcategory": "credit_card_payment", "total": 5000},
+                {"subcategory": "credit_card_interest", "total": 150},
+            ],
+        }
+    )
+
+    baseline = suggest_budget_baseline(analysis)
+
+    assert not {
+        "credit_card_payment",
+        "credit_card_interest",
+    } & {item["category"] for item in baseline}
+
+
+def test_split_mortgages_replace_legacy_category_wide_confirmation():
+    analysis = _analysis()
+    analysis["spending_tree"][0]["categories"][0]["subcategories"] = [
+        item
+        for item in analysis["spending_tree"][0]["categories"][0]["subcategories"]
+        if item["subcategory"] != "mortgage"
+    ]
+    analysis["debt_service_outflows"] = [
+        {
+            "date": date.today().isoformat(),
+            "amount": amount,
+            "category": "mortgage payment",
+            "merchant": merchant,
+        }
+        for merchant, amount in (
+            ("Rocket Mortgage", 1844.35),
+            ("Shellpoint Mortgage Servicing", 785.96),
+        )
+    ]
+    legacy = [
+        {
+            "id": "baseline-mortgage",
+            "name": "Mortgage",
+            "category": "mortgage",
+            "kind": "fixed",
+            "monthly_amount": 1224,
+            "source": "confirmed",
+            "confidence": "high",
+            "active": True,
+        }
+    ]
+
+    reconciled = reconcile_budget_baseline(analysis, legacy)
+
+    assert sum(
+        item["monthly_amount"]
+        for item in reconciled
+        if item["category"] == "mortgage"
+    ) == 2630.31
+    assert all(item["id"] != "baseline-mortgage" for item in reconciled)
+
+
 def test_reconcile_refreshes_inferred_baseline_but_preserves_confirmed_values():
     analysis = _analysis()
     analysis["period_days"] = 180
@@ -444,6 +559,10 @@ def test_other_spending_requires_review_and_is_not_treated_as_savings():
     assert other["proposed_monthly"] == other["current_monthly"]
     assert other["sample_merchants"] == ["Unknown merchant"]
     assert result["spending_savings"] == 100
+    assert any(
+        "Classify uncategorized spending" in reason
+        for reason in result["feasibility"]["reasons"]
+    )
 
 
 def test_scenario_locks_fixed_bills_and_recommends_discretionary_cut():
