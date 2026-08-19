@@ -16,16 +16,6 @@ _VARIABLE_ESSENTIALS = {
     "tolls",
     "transit",
 }
-_FIXED_MANDATORY = {
-    "mortgage",
-    "rent",
-    "hoa",
-    "student_loan",
-    "loan_payment",
-    "internet",
-    "cell_phone",
-    "insurance",
-}
 _DINING = {"dining", "coffee", "delivery"}
 _FREQUENCIES = {"one_time", "monthly", "quarterly", "annual", "custom"}
 _STABLE_UTILITIES = {"internet", "cell_phone"}
@@ -198,7 +188,6 @@ def _spending_rows(
     budget_baseline: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     period_days = max(1.0, float(analysis.get("period_days") or 30.0))
-    covered_months = _complete_coverage_months(period_days)
     baseline_by_category: dict[str, float] = {}
     for item in budget_baseline or []:
         if not item.get("active", True):
@@ -216,8 +205,6 @@ def _spending_rows(
                 current, estimate_confidence = _monthly_spending_estimate(
                     subcategory,
                     period_days=period_days,
-                    fixed=bucket_name == "mandatory" and key in _FIXED_MANDATORY,
-                    covered_months=covered_months,
                 )
                 if bucket_name == "mandatory" and key in baseline_by_category:
                     current = baseline_by_category[key]
@@ -279,8 +266,6 @@ def _monthly_spending_estimate(
     subcategory: dict[str, Any],
     *,
     period_days: float,
-    fixed: bool,
-    covered_months: list[str],
 ) -> tuple[float, str]:
     monthly_totals: dict[str, float] = {}
     for transaction in subcategory.get("transactions") or []:
@@ -295,22 +280,15 @@ def _monthly_spending_estimate(
         monthly_totals[month] = monthly_totals.get(month, 0.0) + amount
 
     observed = list(monthly_totals.values())
-    if fixed and observed:
-        confidence = "high" if len(observed) >= 3 else "medium"
-        return round(median(observed), 2), confidence
-
-    if covered_months:
-        complete_values = [monthly_totals.get(month, 0.0) for month in covered_months]
-        confidence = "high" if len(complete_values) >= 3 else "medium"
-        return round(sum(complete_values) / len(complete_values), 2), confidence
+    if observed:
+        confidence = "high" if len(observed) >= 3 else "medium" if len(observed) == 2 else "low"
+        return round(sum(observed) / len(observed), 2), confidence
 
     normalized = max(
         0.0,
         float(subcategory.get("total") or 0.0) * 30.0 / period_days,
     )
-    if observed and period_days <= 45:
-        return round(sum(observed), 2), "medium"
-    return round(normalized, 2), "medium" if observed else "low"
+    return round(normalized, 2), "low"
 
 
 def _periodic_contribution(
@@ -385,24 +363,6 @@ def _periodic_insurance_profile(
         "confidence": confidence,
         "review_required": review_required,
     }
-
-
-def _complete_coverage_months(period_days: float) -> list[str]:
-    today = date.today()
-    start = date.fromordinal(
-        max(1, today.toordinal() - max(1, int(period_days)) + 1)
-    )
-    cursor = start.replace(day=1)
-    if start.day > 1:
-        cursor = _add_months(cursor, 1)
-    last = today.replace(day=1)
-    if today.day < calendar.monthrange(today.year, today.month)[1]:
-        last = _add_months(last, -1)
-    months: list[str] = []
-    while cursor <= last:
-        months.append(cursor.strftime("%Y-%m"))
-        cursor = _add_months(cursor, 1)
-    return months
 
 
 def _sample_merchants(subcategory: dict[str, Any]) -> list[str]:
@@ -500,8 +460,6 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 "transactions": transactions,
             },
             period_days=period_days,
-            fixed=True,
-            covered_months=_complete_coverage_months(period_days),
         )
         if monthly <= 0:
             continue

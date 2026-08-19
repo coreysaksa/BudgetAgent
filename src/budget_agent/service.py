@@ -710,12 +710,9 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
     """Build an editable, deterministic credit-card payoff what-if proposal."""
     orchestrator = _orchestrator()
     try:
-        # Fetch the widest window first. The aggregator then serves the 180-day
-        # snapshot from that cache instead of making two sequential Plaid pulls.
-        utility_history = orchestrator.snapshot(
-            days=MAX_LOOKBACK_DAYS,
-            refresh_accounts=True,
-        )
+        # Fetch the widest cached window first. Daily startup refresh and the
+        # explicit refresh button control when Plaid is contacted.
+        utility_history = orchestrator.snapshot(days=MAX_LOOKBACK_DAYS)
     except Exception as exc:  # noqa: BLE001 - current payoff analysis remains usable
         _log.warning("utility history unavailable for payoff scenario: %s", exc)
         utility_history = None

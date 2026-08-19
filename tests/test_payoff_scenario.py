@@ -135,7 +135,7 @@ def _utility_history(transactions):
     }
 
 
-def test_fixed_mandatory_baseline_uses_observed_monthly_median():
+def test_fixed_mandatory_baseline_uses_observed_monthly_average():
     analysis = _analysis()
     analysis["period_days"] = 180
     mortgage = analysis["spending_tree"][0]["categories"][0]["subcategories"][0]
@@ -153,6 +153,36 @@ def test_fixed_mandatory_baseline_uses_observed_monthly_median():
     mortgage_item = next(item for item in baseline if item["category"] == "mortgage")
 
     assert mortgage_item["monthly_amount"] == 2630
+    assert mortgage_item["confidence"] == "high"
+
+
+def test_fixed_mandatory_uses_arithmetic_average_of_observed_months():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    mortgage = analysis["spending_tree"][0]["categories"][0]["subcategories"][0]
+    mortgage["total"] = 8700
+    mortgage["transactions"] = [
+        {
+            "date": _month(date.today(), -3).isoformat(),
+            "amount": 2200,
+            "merchant": "Mortgage servicer",
+        },
+        {
+            "date": _month(date.today(), -2).isoformat(),
+            "amount": 2500,
+            "merchant": "Mortgage servicer",
+        },
+        {
+            "date": _month(date.today(), -1).isoformat(),
+            "amount": 4000,
+            "merchant": "Mortgage servicer",
+        },
+    ]
+
+    baseline = suggest_budget_baseline(analysis)
+    mortgage_item = next(item for item in baseline if item["category"] == "mortgage")
+
+    assert mortgage_item["monthly_amount"] == 2900
     assert mortgage_item["confidence"] == "high"
 
 
@@ -277,7 +307,7 @@ def test_reconcile_refreshes_inferred_baseline_but_preserves_confirmed_values():
     )["monthly_amount"] == 1224
 
 
-def test_variable_spending_averages_complete_months_from_long_history():
+def test_variable_spending_includes_each_observed_month_from_long_history():
     analysis = _analysis()
     analysis["period_days"] = 180
     dining = analysis["spending_tree"][1]["categories"][0]["subcategories"][0]
@@ -300,9 +330,94 @@ def test_variable_spending_averages_complete_months_from_long_history():
     result = build_payoff_scenario(analysis, _cash_flow(), [])
     dining_row = next(row for row in result["spending"] if row["key"] == "dining")
 
+    assert dining_row["current_monthly"] == 233.33
+    assert dining_row["proposed_monthly"] == 175
+    assert dining_row["estimate_confidence"] == "high"
+
+
+def test_sparse_discretionary_spending_does_not_average_in_zero_months():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    dining = analysis["spending_tree"][1]["categories"][0]["subcategories"][0]
+    dining["total"] = 300
+    dining["transactions"] = [
+        {
+            "date": _month(date.today(), -offset).isoformat(),
+            "amount": 100,
+            "merchant": "Restaurant",
+        }
+        for offset in (1, 3, 5)
+    ]
+
+    result = build_payoff_scenario(analysis, _cash_flow(), [])
+    dining_row = next(row for row in result["spending"] if row["key"] == "dining")
+
     assert dining_row["current_monthly"] == 100
     assert dining_row["proposed_monthly"] == 75
     assert dining_row["estimate_confidence"] == "high"
+
+
+def test_single_observed_utility_month_uses_that_month():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    analysis["spending_tree"][0]["categories"].append(
+        {
+            "category": "utilities",
+            "subcategories": [
+                {
+                    "subcategory": "electric",
+                    "total": 185,
+                    "transactions": [
+                        {
+                            "date": _month(date.today(), -2).isoformat(),
+                            "amount": 185,
+                            "merchant": "Electric utility",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    result = build_payoff_scenario(analysis, _cash_flow(), [])
+    electric = next(row for row in result["spending"] if row["key"] == "electric")
+
+    assert electric["current_monthly"] == 185
+    assert electric["estimate_confidence"] == "low"
+
+
+def test_two_observed_utility_months_are_divided_by_two():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    analysis["spending_tree"][0]["categories"].append(
+        {
+            "category": "utilities",
+            "subcategories": [
+                {
+                    "subcategory": "electric",
+                    "total": 300,
+                    "transactions": [
+                        {
+                            "date": _month(date.today(), -2).isoformat(),
+                            "amount": 100,
+                            "merchant": "Electric utility",
+                        },
+                        {
+                            "date": _month(date.today(), -1).isoformat(),
+                            "amount": 200,
+                            "merchant": "Electric utility",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    result = build_payoff_scenario(analysis, _cash_flow(), [])
+    electric = next(row for row in result["spending"] if row["key"] == "electric")
+
+    assert electric["current_monthly"] == 150
+    assert electric["estimate_confidence"] == "medium"
 
 
 def test_other_spending_requires_review_and_is_not_treated_as_savings():
@@ -747,7 +862,7 @@ def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
 
     assert response.status_code == 200
     assert orchestrator.snapshot_days == [
-        (730, {"refresh_accounts": True}),
+        (730, {}),
         (180, {}),
     ]
     assert seen["utility_history"] is history
