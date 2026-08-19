@@ -1044,6 +1044,7 @@ def build_payoff_scenario(
         max(0.0, float(account.get("minimum_payment") or 0.0))
         for account in analysis.get("accounts") or []
         if account.get("type") == "credit"
+        and abs(float(account.get("balance") or 0.0)) > 0.01
     )
     proposed_income = (
         suggest_extra_income(analysis) if extra_income is None else extra_income
@@ -1070,6 +1071,7 @@ def build_payoff_scenario(
         str(account.get("name") or "Credit card")
         for account in analysis.get("accounts") or []
         if account.get("type") == "credit"
+        and abs(float(account.get("balance") or 0.0)) > 0.01
         and (
             account.get("minimum_payment") is None
             or str(account.get("minimum_payment_status") or "").lower()

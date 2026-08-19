@@ -477,6 +477,27 @@ def test_missing_card_minimum_requires_confirmation_for_feasibility():
     )
 
 
+def test_zero_balance_card_has_no_minimum_or_confirmation_warning():
+    analysis = _analysis()
+    analysis["accounts"][0]["balance"] = 0
+    analysis["accounts"][0]["minimum_payment"] = 75
+    analysis["accounts"][0]["minimum_payment_status"] = "missing"
+
+    result = build_payoff_scenario(
+        analysis,
+        _cash_flow(),
+        [],
+        validate_feasibility=True,
+    )
+
+    assert result["plan"] is None
+    assert result["feasibility"]["status"] == "feasible"
+    assert not any(
+        "Confirm the minimum payment" in reason
+        for reason in result["feasibility"]["reasons"]
+    )
+
+
 def test_extra_income_protects_hard_goal_shortfall_then_pays_debt():
     first = date.today() + timedelta(days=10)
     result = build_payoff_scenario(
