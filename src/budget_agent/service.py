@@ -284,6 +284,7 @@ class BudgetBaselineItemInput(BaseModel):
     category: str
     kind: str = "fixed"
     monthly_amount: float = 0.0
+    inferred_monthly_amount: float | None = None
     due_day: int | None = Field(default=None, ge=1, le=31)
     periodic_amount: float | None = None
     frequency_months: int | None = Field(default=None, ge=1)
@@ -291,6 +292,9 @@ class BudgetBaselineItemInput(BaseModel):
     reserved_balance: float = 0.0
     funding_account_id: str | None = None
     review_required: bool = False
+    review_prompt: str | None = None
+    override_reason: str = ""
+    override_status: str = "none"
     source: str = "inferred"
     confidence: str = "low"
     active: bool = True

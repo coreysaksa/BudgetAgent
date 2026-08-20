@@ -186,7 +186,7 @@ def test_fixed_mandatory_uses_arithmetic_average_of_observed_months():
     assert mortgage_item["confidence"] == "high"
 
 
-def test_sparse_insurance_becomes_reviewable_six_month_sinking_fund():
+def test_sparse_insurance_asks_for_schedule_without_assuming_it():
     analysis = _analysis()
     analysis["period_days"] = 180
     analysis["spending_tree"][0]["categories"].append(
@@ -213,10 +213,11 @@ def test_sparse_insurance_becomes_reviewable_six_month_sinking_fund():
 
     assert insurance["kind"] == "periodic"
     assert insurance["periodic_amount"] == 555
-    assert insurance["frequency_months"] == 6
-    assert insurance["monthly_amount"] == 92.5
+    assert insurance["frequency_months"] is None
+    assert insurance["monthly_amount"] == 0
     assert insurance["review_required"] is True
     assert insurance["confidence"] == "low"
+    assert "Confirm how often" in insurance["review_prompt"]
 
 
 def test_confirmed_periodic_reserve_uses_due_date_and_reserved_balance():
@@ -244,6 +245,102 @@ def test_confirmed_periodic_reserve_uses_due_date_and_reserved_balance():
 
     assert reconciled[0]["monthly_amount"] == 100
     assert reconciled[0]["periodic_amount"] == 555
+
+
+def test_sparse_vehicle_tax_asks_for_user_amount_and_due_date():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    analysis["spending_tree"][0]["categories"].append(
+        {
+            "category": "transport",
+            "subcategories": [
+                {
+                    "subcategory": "vehicle_property_tax",
+                    "total": 450,
+                    "transactions": [
+                        {
+                            "date": date.today().isoformat(),
+                            "amount": 450,
+                            "merchant": "County tax",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    baseline = suggest_budget_baseline(analysis)
+    tax = next(
+        item for item in baseline if item["category"] == "vehicle_property_tax"
+    )
+
+    assert tax["kind"] == "periodic"
+    assert tax["monthly_amount"] == 0
+    assert tax["frequency_months"] is None
+    assert "amount and due date" in tax["review_prompt"]
+
+
+def test_regular_monthly_home_maintenance_stays_in_observed_budget():
+    analysis = _analysis()
+    analysis["period_days"] = 180
+    analysis["spending_tree"][0]["categories"].append(
+        {
+            "category": "housing",
+            "subcategories": [
+                {
+                    "subcategory": "house_maintenance",
+                    "total": 600,
+                    "transactions": [
+                        {
+                            "date": _month(date.today(), -offset).isoformat(),
+                            "amount": 120,
+                            "merchant": "Maintenance provider",
+                        }
+                        for offset in range(5)
+                    ],
+                }
+            ],
+        }
+    )
+
+    baseline = suggest_budget_baseline(analysis)
+    maintenance = next(
+        item for item in baseline if item["category"] == "house_maintenance"
+    )
+
+    assert maintenance["kind"] == "fixed"
+    assert maintenance["monthly_amount"] == 120
+    assert maintenance["review_required"] is False
+
+
+def test_mandatory_override_requires_evidence_based_reason():
+    analysis = _analysis()
+    inferred = suggest_budget_baseline(analysis)
+    mortgage = next(item for item in inferred if item["category"] == "mortgage")
+    override = {
+        **mortgage,
+        "monthly_amount": 1000,
+        "source": "confirmed",
+        "override_reason": "make it cheaper",
+    }
+
+    rejected = reconcile_budget_baseline(analysis, [override])
+    rejected_mortgage = next(
+        item for item in rejected if item["category"] == "mortgage"
+    )
+    assert rejected_mortgage["monthly_amount"] == mortgage["monthly_amount"]
+    assert rejected_mortgage["override_status"] == "rejected"
+    assert rejected_mortgage["review_required"] is True
+
+    override["override_reason"] = (
+        "One-time repair deposit was miscategorized as mortgage spending."
+    )
+    accepted = reconcile_budget_baseline(analysis, [override])
+    accepted_mortgage = next(
+        item for item in accepted if item["category"] == "mortgage"
+    )
+    assert accepted_mortgage["monthly_amount"] == 1000
+    assert accepted_mortgage["override_status"] == "accepted"
 
 
 def test_mortgage_debt_service_cash_outflow_becomes_baseline_item():
@@ -343,7 +440,7 @@ def test_card_payments_and_interest_are_replaced_by_account_minimums():
     } & {item["category"] for item in baseline}
 
 
-def test_split_mortgages_replace_legacy_category_wide_confirmation():
+def test_observed_mortgages_replace_unjustified_legacy_confirmation():
     analysis = _analysis()
     analysis["spending_tree"][0]["categories"][0]["subcategories"] = [
         item
@@ -382,10 +479,13 @@ def test_split_mortgages_replace_legacy_category_wide_confirmation():
         for item in reconciled
         if item["category"] == "mortgage"
     ) == 2630.31
-    assert all(item["id"] != "baseline-mortgage" for item in reconciled)
+    mortgage = next(
+        item for item in reconciled if item["category"] == "mortgage"
+    )
+    assert mortgage["override_status"] == "rejected"
 
 
-def test_reconcile_refreshes_inferred_baseline_but_preserves_confirmed_values():
+def test_reconcile_refreshes_inferred_and_unjustified_confirmed_values():
     analysis = _analysis()
     analysis["period_days"] = 180
     mortgage = analysis["spending_tree"][0]["categories"][0]["subcategories"][0]
@@ -419,7 +519,7 @@ def test_reconcile_refreshes_inferred_baseline_but_preserves_confirmed_values():
     confirmed = reconcile_budget_baseline(analysis, stale)
     assert next(
         item for item in confirmed if item["category"] == "mortgage"
-    )["monthly_amount"] == 1224
+    )["monthly_amount"] == 2630
 
 
 def test_variable_spending_includes_each_observed_month_from_long_history():

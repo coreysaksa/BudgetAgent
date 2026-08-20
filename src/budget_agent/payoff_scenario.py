@@ -31,6 +31,29 @@ _SPENDING_LABELS = {
     "hoa_fees": "HOA fees",
     "car_loans": "Car payment",
 }
+_PERIODIC_CANDIDATES = {
+    "insurance",
+    "car_maintenance",
+    "vehicle_property_tax",
+    "property_tax",
+    "house_maintenance",
+}
+_OVERRIDE_REASON_MARKERS = {
+    "one-time",
+    "one time",
+    "outlier",
+    "repair",
+    "deposit",
+    "not fuel",
+    "not gas",
+    "not part",
+    "miscategor",
+    "duplicate",
+    "reimburs",
+    "refund",
+    "included in",
+    "escrow",
+}
 
 
 class UtilityHistorySnapshot(TypedDict, total=False):
@@ -318,13 +341,16 @@ def _periodic_contribution(
     if due is not None:
         months = (due.year - start.year) * 12 + due.month - start.month
     if months <= 0:
-        months = max(1, int(frequency_months or 1))
+        if not frequency_months:
+            return 0.0
+        months = max(1, int(frequency_months))
     return round(remaining / months, 2)
 
 
-def _periodic_insurance_profile(
+def _periodic_obligation_profile(
     subcategory: dict[str, Any],
     *,
+    category: str,
     period_days: float,
 ) -> dict[str, Any] | None:
     monthly_totals: dict[str, float] = {}
@@ -356,13 +382,32 @@ def _periodic_insurance_profile(
             frequency_months = typical_gap
             confidence = "high" if len(gaps) >= 2 else "medium"
             review_required = confidence != "high"
-    elif period_days >= 120:
-        # Semiannual is a common insurance cadence, but one observed renewal is
-        # not enough evidence to make it authoritative.
-        frequency_months = 6
-    if frequency_months is None:
+    if frequency_months is None and (
+        len(monthly_totals) != 1 or period_days < 120
+    ):
         return None
     periodic_amount = round(median(list(monthly_totals.values())), 2)
+    prompts = {
+        "insurance": (
+            "Confirm how often this insurance bill is due, its next due date, "
+            "and how much is already reserved."
+        ),
+        "car_maintenance": (
+            "Is this normal vehicle maintenance, a one-time repair/deposit, or "
+            "an upcoming service? Enter the expected amount and next due date."
+        ),
+        "vehicle_property_tax": (
+            "Confirm the vehicle property-tax amount and due date."
+        ),
+        "property_tax": (
+            "Is this property tax already included in mortgage escrow? If not, "
+            "confirm its amount and due date."
+        ),
+        "house_maintenance": (
+            "Confirm whether this is recurring home maintenance or a one-time "
+            "repair, then enter the expected amount and schedule."
+        ),
+    }
     return {
         "periodic_amount": periodic_amount,
         "frequency_months": frequency_months,
@@ -374,6 +419,10 @@ def _periodic_insurance_profile(
         ),
         "confidence": confidence,
         "review_required": review_required,
+        "review_prompt": prompts.get(
+            category,
+            "Confirm the amount, frequency, and next due date for this obligation.",
+        ),
     }
 
 
@@ -427,7 +476,10 @@ def _debt_service_baseline_suggestions(
                 "category": category,
                 "kind": "fixed",
                 "monthly_amount": monthly,
+                "inferred_monthly_amount": monthly,
                 "due_day": None,
+                "override_reason": "",
+                "override_status": "none",
                 "source": "inferred",
                 "confidence": confidence,
                 "active": True,
@@ -457,11 +509,12 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
             None,
         )
         periodic = (
-            _periodic_insurance_profile(
+            _periodic_obligation_profile(
                 subcategory,
+                category=key,
                 period_days=max(1.0, float(analysis.get("period_days") or 30.0)),
             )
-            if key == "insurance" and subcategory is not None
+            if key in _PERIODIC_CANDIDATES and subcategory is not None
             else None
         )
         variable = key in _VARIABLE_ESSENTIALS or key in _SEASONAL_UTILITIES
@@ -478,6 +531,9 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                     if periodic
                     else round(float(row["current_monthly"]), 2)
                 ),
+                "inferred_monthly_amount": round(
+                    float(row["current_monthly"]), 2
+                ),
                 "due_day": None,
                 "periodic_amount": periodic["periodic_amount"] if periodic else None,
                 "frequency_months": (
@@ -489,6 +545,11 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 "review_required": (
                     periodic["review_required"] if periodic else False
                 ),
+                "review_prompt": (
+                    periodic["review_prompt"] if periodic else None
+                ),
+                "override_reason": "",
+                "override_status": "none",
                 "source": "inferred",
                 "confidence": (
                     periodic["confidence"]
@@ -501,6 +562,20 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     existing = {str(item["category"]) for item in suggestions}
     suggestions.extend(_debt_service_baseline_suggestions(analysis, existing))
     return suggestions
+
+
+def _reasonable_mandatory_override(
+    reason: str,
+    *,
+    proposed: float,
+    inferred: float,
+) -> bool:
+    if abs(proposed - inferred) <= 0.01:
+        return True
+    normalized = reason.strip().lower()
+    return len(normalized) >= 12 and any(
+        marker in normalized for marker in _OVERRIDE_REASON_MARKERS
+    )
 
 
 def reconcile_budget_baseline(
@@ -517,6 +592,14 @@ def reconcile_budget_baseline(
             for item in suggested
         )
     }
+    suggested_by_id = {
+        str(item.get("id") or ""): item for item in suggested
+    }
+    suggested_by_category: dict[str, list[dict[str, Any]]] = {}
+    for item in suggested:
+        suggested_by_category.setdefault(
+            str(item.get("category") or ""), []
+        ).append(item)
     confirmed: list[dict[str, Any]] = []
     for existing in budget_baseline or []:
         if str(existing.get("source") or "inferred") != "confirmed":
@@ -524,11 +607,6 @@ def reconcile_budget_baseline(
         item = dict(existing)
         category = str(item.get("category") or "")
         if category in _TRANSACTION_PAYMENT_BASELINE_CATEGORIES:
-            continue
-        if (
-            category in observed_debt_categories
-            and str(item.get("id") or "") == f"baseline-{category}"
-        ):
             continue
         if str(item.get("kind") or "") == "periodic":
             item["monthly_amount"] = _periodic_contribution(
@@ -545,6 +623,52 @@ def reconcile_budget_baseline(
                     0.0, float(item.get("reserved_balance") or 0.0)
                 ),
             )
+            item["override_status"] = "accepted"
+            item["review_required"] = not (
+                item.get("periodic_amount")
+                and (item.get("frequency_months") or item.get("next_due_date"))
+            )
+            confirmed.append(item)
+            continue
+
+        inferred_item = suggested_by_id.get(str(item.get("id") or ""))
+        category_matches = suggested_by_category.get(category, [])
+        if inferred_item is None and len(category_matches) == 1:
+            inferred_item = category_matches[0]
+        if inferred_item is not None:
+            inferred_amount = max(
+                0.0, float(inferred_item.get("monthly_amount") or 0.0)
+            )
+            proposed_amount = max(
+                0.0, float(item.get("monthly_amount") or 0.0)
+            )
+            reason = str(item.get("override_reason") or "").strip()
+            item["inferred_monthly_amount"] = inferred_amount
+            if _reasonable_mandatory_override(
+                reason,
+                proposed=proposed_amount,
+                inferred=inferred_amount,
+            ):
+                item["override_status"] = (
+                    "accepted"
+                    if abs(proposed_amount - inferred_amount) > 0.01
+                    else "none"
+                )
+                item["review_required"] = False
+            else:
+                item["monthly_amount"] = inferred_amount
+                item["override_status"] = "rejected"
+                item["review_required"] = True
+                item["review_prompt"] = (
+                    "Explain why this mandatory amount differs from observed "
+                    "transactions. Examples: a one-time repair, deposit, duplicate, "
+                    "reimbursement, escrowed tax, or miscategorized purchase."
+                )
+        if (
+            category in observed_debt_categories
+            and inferred_item is None
+        ):
+            continue
         confirmed.append(item)
     confirmed_categories = {
         str(item.get("category") or "")
@@ -557,6 +681,11 @@ def reconcile_budget_baseline(
         item_id = str(item.get("id") or "")
         category = str(item.get("category") or "")
         if item_id in confirmed_ids:
+            continue
+        if (
+            category in observed_debt_categories
+            and category in confirmed_categories
+        ):
             continue
         if item_id == f"baseline-{category}" and category in confirmed_categories:
             continue
