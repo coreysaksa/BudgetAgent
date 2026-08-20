@@ -233,9 +233,7 @@ def _spending_rows(
                         or key in _VARIABLE_ESSENTIALS
                     )
                 )
-                override_allowed = (
-                    not review_required and key not in _UTILITY_SUBCATEGORIES
-                )
+                override_allowed = adjustable
                 minimum = (
                     current
                     if review_required
@@ -790,6 +788,7 @@ def _allocate_extra_income_to_goals(
     rows: list[dict[str, Any]],
     analysis: dict[str, Any],
     start: date,
+    debt_goals: list[dict[str, Any]] | None = None,
 ) -> tuple[float, float, float, dict[str, float]]:
     candidates = [row for row in rows if row["kind"] != "debt_payoff"]
     remaining = {row["goal_id"]: float(row["remaining"]) for row in candidates}
@@ -802,6 +801,21 @@ def _allocate_extra_income_to_goals(
         for account in analysis.get("accounts") or []
         if account.get("type") == "credit"
     )
+    urgent_debt = [
+        {
+            "goal_id": str(goal.get("id") or ""),
+            "name": str(goal.get("name") or "Debt payoff"),
+            "priority": min(5, max(1, int(goal.get("priority") or 3))),
+            "target_date": str(goal.get("target_date") or ""),
+            "remaining": max(0.0, float(goal.get("target_amount") or 0.0)),
+        }
+        for goal in debt_goals or []
+        if str(goal.get("kind") or "").lower() == "debt_payoff"
+        and str(goal.get("status") or "active").lower() == "active"
+        and str(goal.get("deadline_type") or "soft").lower() == "hard"
+        and _parse_date(goal.get("target_date")) is not None
+        and float(goal.get("target_amount") or 0.0) > 0
+    ]
     goal_total = 0.0
     unassigned_total = 0.0
     debt_payments: dict[str, float] = {}
@@ -822,6 +836,30 @@ def _allocate_extra_income_to_goals(
         rationale: list[str] = []
         for when in occurrences:
             available = amount_each
+            for row in sorted(
+                (
+                    row
+                    for row in urgent_debt
+                    if row["remaining"] > 0
+                    and when <= (_parse_date(row["target_date"]) or when)
+                ),
+                key=lambda row: (row["target_date"], row["priority"]),
+            ):
+                if available <= 0 or debt_remaining <= 0:
+                    break
+                debt_amount = min(available, debt_remaining, row["remaining"])
+                row["remaining"] -= debt_amount
+                debt_remaining -= debt_amount
+                available -= debt_amount
+                stream_debt += debt_amount
+                debt_total += debt_amount
+                allocations[row["goal_id"]] = (
+                    allocations.get(row["goal_id"], 0.0) + debt_amount
+                )
+                month = when.strftime("%Y-%m")
+                debt_payments[month] = (
+                    debt_payments.get(month, 0.0) + debt_amount
+                )
             hard = sorted(
                 [
                     row
@@ -911,12 +949,19 @@ def _allocate_extra_income_to_goals(
         stream["allocation_rationale"] = rationale
         stream["goal_allocations"] = [
             {
-                "goal_id": row["goal_id"],
-                "name": row["name"],
-                "amount": round(allocations[row["goal_id"]], 2),
+                "goal_id": goal_id,
+                "name": next(
+                    (
+                        row["name"]
+                        for row in [*urgent_debt, *candidates]
+                        if row["goal_id"] == goal_id
+                    ),
+                    "Goal",
+                ),
+                "amount": round(amount, 2),
             }
-            for row in candidates
-            if allocations.get(row["goal_id"], 0.0) > 0
+            for goal_id, amount in allocations.items()
+            if amount > 0
         ]
         stream["unassigned_savings"] = round(stream_unassigned, 2)
         unassigned_total += stream_unassigned
@@ -1089,7 +1134,7 @@ def build_payoff_scenario(
         extra_unassigned_total,
         extra_payments,
     ) = _allocate_extra_income_to_goals(
-        streams, portfolio_rows, analysis, today
+        streams, portfolio_rows, analysis, today, debt_goals=goals
     )
     plan = payoff_from_snapshot(
         analysis,
@@ -1157,8 +1202,9 @@ def build_payoff_scenario(
             )
     if safe_before_floor < -0.01:
         reasons.append(
-            f"The proposed monthly spending exceeds available cash by "
-            f"${abs(safe_before_floor):,.2f}."
+            f"Recurring monthly obligations exceed recurring income by "
+            f"${abs(safe_before_floor):,.2f}. Dated extra income is applied on "
+            "its scheduled dates but does not eliminate this monthly shortfall."
         )
     behind_goals = [
         row["name"]

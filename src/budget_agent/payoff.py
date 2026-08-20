@@ -307,9 +307,16 @@ def build_payoff_plan(
         if not on_time:
             feasible = False
             when = s.deadline.isoformat() if s.deadline else "the horizon"
+            scheduled_extra = sum(
+                max(0.0, float(amount))
+                for amount in (extra_payments_by_month or {}).values()
+            )
+            funding = f"${monthly_budget:,.0f}/mo"
+            if scheduled_extra > 0:
+                funding += f" plus ${scheduled_extra:,.0f} in scheduled extra payments"
             warnings.append(
                 f"{s.card.name} can't be paid off by {when} with "
-                f"${monthly_budget:,.0f}/mo — increase the monthly budget or extend the date."
+                f"{funding} — increase funding or extend the date."
             )
         card_summaries.append(
             {

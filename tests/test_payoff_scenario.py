@@ -655,7 +655,7 @@ def test_scenario_locks_fixed_bills_and_recommends_discretionary_cut():
     by_key = {row["key"]: row for row in result["spending"]}
 
     assert by_key["mortgage"]["adjustable"] is False
-    assert by_key["mortgage"]["override_allowed"] is True
+    assert by_key["mortgage"]["override_allowed"] is False
     assert by_key["groceries"]["adjustable"] is True
     assert by_key["groceries"]["minimum_monthly"] == 420
     assert by_key["dining"]["proposed_monthly"] == 300
@@ -701,7 +701,7 @@ def test_confirmed_baseline_drives_direct_survival_budget():
     assert result["survival_budget_breakdown"][0]["name"] == "Confirmed mortgage"
 
 
-def test_fixed_obligation_override_updates_survival_budget():
+def test_fixed_obligation_adjustment_is_ignored():
     result = build_payoff_scenario(
         _analysis(),
         _cash_flow(),
@@ -713,9 +713,9 @@ def test_fixed_obligation_override_updates_survival_budget():
     )
     mortgage = next(row for row in result["spending"] if row["key"] == "mortgage")
 
-    assert mortgage["proposed_monthly"] == 2594
+    assert mortgage["proposed_monthly"] == mortgage["current_monthly"]
     assert mortgage["override_reason"] == "Primary mortgage plus second mortgage."
-    assert result["minimum_survival_budget"] == 4594
+    assert result["minimum_survival_budget"] == 3500
     assert not any(
         "Explain these overrides" in reason
         for reason in result["feasibility"]["reasons"]
@@ -853,6 +853,101 @@ def test_extra_income_protects_hard_goal_shortfall_then_pays_debt():
     assert result["portfolio_plan"]["extra_income_to_debt"] == 800
     assert result["portfolio_plan"]["extra_income_to_goals"] == 400
     assert result["portfolio_plan"]["extra_income_unassigned"] == 0
+
+
+def test_extra_income_protects_earlier_hard_debt_before_savings():
+    today = date.today()
+    first = today + timedelta(days=10)
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [
+            {
+                "id": "promo",
+                "name": "Promo payoff",
+                "kind": "debt_payoff",
+                "target_amount": 900,
+                "target_date": _month(today, 2).isoformat(),
+                "deadline_type": "hard",
+                "priority": 1,
+            },
+            {
+                "id": "vacation",
+                "name": "Wedding vacation",
+                "kind": "savings",
+                "target_amount": 2000,
+                "target_date": _month(today, 8).isoformat(),
+                "deadline_type": "hard",
+                "priority": 2,
+            },
+        ],
+        extra_income=[
+            {
+                "name": "Bonus",
+                "amount": 1200,
+                "frequency": "one_time",
+                "first_date": first.isoformat(),
+                "status": "confirmed",
+            }
+        ],
+    )
+
+    stream = result["extra_income"][0]
+    assert stream["debt_amount_per_occurrence"] == 900
+    assert stream["savings_amount_per_occurrence"] == 300
+    assert result["extra_payments_by_month"][first.strftime("%Y-%m")] == 900
+    assert stream["goal_allocations"][0] == {
+        "goal_id": "promo",
+        "name": "Promo payoff",
+        "amount": 900,
+    }
+
+
+def test_periodic_mandatory_spending_does_not_create_override_warning():
+    analysis = _analysis()
+    analysis["spending_tree"][0]["categories"][0]["subcategories"].append(
+        {
+            "subcategory": "car_maintenance",
+            "total": 600,
+            "transactions": [
+                {
+                    "date": date.today().isoformat(),
+                    "amount": 600,
+                    "merchant": "Repair shop",
+                }
+            ],
+        }
+    )
+    result = build_payoff_scenario(
+        analysis,
+        _cash_flow(),
+        [],
+        budget_baseline=[
+            {
+                "id": "car-maintenance",
+                "name": "Car Maintenance",
+                "category": "car_maintenance",
+                "kind": "periodic",
+                "monthly_amount": 0,
+                "periodic_amount": 600,
+                "frequency_months": None,
+                "source": "inferred",
+                "confidence": "low",
+                "active": True,
+            }
+        ],
+        spending_adjustments={"car_maintenance": 100},
+    )
+
+    maintenance = next(
+        row for row in result["spending"] if row["key"] == "car_maintenance"
+    )
+    assert maintenance["override_allowed"] is False
+    assert maintenance["proposed_monthly"] == 0
+    assert not any(
+        "Car Maintenance" in reason
+        for reason in result["feasibility"]["reasons"]
+    )
 
 
 def test_unsafe_user_extra_target_is_not_feasible():
