@@ -293,8 +293,6 @@ class BudgetBaselineItemInput(BaseModel):
     funding_account_id: str | None = None
     review_required: bool = False
     review_prompt: str | None = None
-    override_reason: str = ""
-    override_status: str = "none"
     source: str = "inferred"
     confidence: str = "low"
     active: bool = True

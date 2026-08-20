@@ -38,24 +38,6 @@ _PERIODIC_CANDIDATES = {
     "property_tax",
     "house_maintenance",
 }
-_OVERRIDE_REASON_MARKERS = {
-    "one-time",
-    "one time",
-    "outlier",
-    "repair",
-    "deposit",
-    "not fuel",
-    "not gas",
-    "not part",
-    "miscategor",
-    "duplicate",
-    "reimburs",
-    "refund",
-    "included in",
-    "escrow",
-}
-
-
 class UtilityHistorySnapshot(TypedDict, total=False):
     """Longer analyzer snapshot used only for deterministic utility forecasting."""
 
@@ -478,8 +460,6 @@ def _debt_service_baseline_suggestions(
                 "monthly_amount": monthly,
                 "inferred_monthly_amount": monthly,
                 "due_day": None,
-                "override_reason": "",
-                "override_status": "none",
                 "source": "inferred",
                 "confidence": confidence,
                 "active": True,
@@ -548,8 +528,6 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 "review_prompt": (
                     periodic["review_prompt"] if periodic else None
                 ),
-                "override_reason": "",
-                "override_status": "none",
                 "source": "inferred",
                 "confidence": (
                     periodic["confidence"]
@@ -564,133 +542,55 @@ def suggest_budget_baseline(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     return suggestions
 
 
-def _reasonable_mandatory_override(
-    reason: str,
-    *,
-    proposed: float,
-    inferred: float,
-) -> bool:
-    if abs(proposed - inferred) <= 0.01:
-        return True
-    normalized = reason.strip().lower()
-    return len(normalized) >= 12 and any(
-        marker in normalized for marker in _OVERRIDE_REASON_MARKERS
-    )
-
-
 def reconcile_budget_baseline(
     analysis: dict[str, Any],
     budget_baseline: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """Refresh inferred categories while preserving confirmed user decisions."""
+    """Refresh mandatory spending while preserving confirmed periodic schedules."""
     suggested = suggest_budget_baseline(analysis)
-    observed_debt_categories = {
-        category
-        for category in {"mortgage", "loan_payment"}
-        if any(
-            str(item.get("id") or "") == f"baseline-{category}-observed"
-            for item in suggested
-        )
-    }
-    suggested_by_id = {
-        str(item.get("id") or ""): item for item in suggested
-    }
-    suggested_by_category: dict[str, list[dict[str, Any]]] = {}
-    for item in suggested:
-        suggested_by_category.setdefault(
-            str(item.get("category") or ""), []
-        ).append(item)
-    confirmed: list[dict[str, Any]] = []
+    confirmed_periodic: list[dict[str, Any]] = []
     for existing in budget_baseline or []:
-        if str(existing.get("source") or "inferred") != "confirmed":
+        if (
+            str(existing.get("source") or "inferred") != "confirmed"
+            or str(existing.get("kind") or "") != "periodic"
+        ):
             continue
         item = dict(existing)
         category = str(item.get("category") or "")
         if category in _TRANSACTION_PAYMENT_BASELINE_CATEGORIES:
             continue
-        if str(item.get("kind") or "") == "periodic":
-            item["monthly_amount"] = _periodic_contribution(
-                max(0.0, float(item.get("periodic_amount") or 0.0)),
-                frequency_months=(
-                    int(item["frequency_months"])
-                    if item.get("frequency_months")
-                    else None
-                ),
-                next_due_date=(
-                    str(item["next_due_date"]) if item.get("next_due_date") else None
-                ),
-                reserved_balance=max(
-                    0.0, float(item.get("reserved_balance") or 0.0)
-                ),
-            )
-            item["override_status"] = "accepted"
-            item["review_required"] = not (
-                item.get("periodic_amount")
-                and (item.get("frequency_months") or item.get("next_due_date"))
-            )
-            confirmed.append(item)
-            continue
-
-        inferred_item = suggested_by_id.get(str(item.get("id") or ""))
-        category_matches = suggested_by_category.get(category, [])
-        if inferred_item is None and len(category_matches) == 1:
-            inferred_item = category_matches[0]
-        if inferred_item is not None:
-            inferred_amount = max(
-                0.0, float(inferred_item.get("monthly_amount") or 0.0)
-            )
-            proposed_amount = max(
-                0.0, float(item.get("monthly_amount") or 0.0)
-            )
-            reason = str(item.get("override_reason") or "").strip()
-            item["inferred_monthly_amount"] = inferred_amount
-            if _reasonable_mandatory_override(
-                reason,
-                proposed=proposed_amount,
-                inferred=inferred_amount,
-            ):
-                item["override_status"] = (
-                    "accepted"
-                    if abs(proposed_amount - inferred_amount) > 0.01
-                    else "none"
-                )
-                item["review_required"] = False
-            else:
-                item["monthly_amount"] = inferred_amount
-                item["override_status"] = "rejected"
-                item["review_required"] = True
-                item["review_prompt"] = (
-                    "Explain why this mandatory amount differs from observed "
-                    "transactions. Examples: a one-time repair, deposit, duplicate, "
-                    "reimbursement, escrowed tax, or miscategorized purchase."
-                )
-        if (
-            category in observed_debt_categories
-            and inferred_item is None
-        ):
-            continue
-        confirmed.append(item)
+        item["monthly_amount"] = _periodic_contribution(
+            max(0.0, float(item.get("periodic_amount") or 0.0)),
+            frequency_months=(
+                int(item["frequency_months"])
+                if item.get("frequency_months")
+                else None
+            ),
+            next_due_date=(
+                str(item["next_due_date"]) if item.get("next_due_date") else None
+            ),
+            reserved_balance=max(
+                0.0, float(item.get("reserved_balance") or 0.0)
+            ),
+        )
+        item["review_required"] = not (
+            item.get("periodic_amount")
+            and (item.get("frequency_months") or item.get("next_due_date"))
+        )
+        item.pop("override_reason", None)
+        item.pop("override_status", None)
+        confirmed_periodic.append(item)
     confirmed_categories = {
         str(item.get("category") or "")
-        for item in confirmed
+        for item in confirmed_periodic
         if item.get("active", True)
     }
-    confirmed_ids = {str(item.get("id") or "") for item in confirmed}
-    inferred = []
-    for item in suggested:
-        item_id = str(item.get("id") or "")
-        category = str(item.get("category") or "")
-        if item_id in confirmed_ids:
-            continue
-        if (
-            category in observed_debt_categories
-            and category in confirmed_categories
-        ):
-            continue
-        if item_id == f"baseline-{category}" and category in confirmed_categories:
-            continue
-        inferred.append(item)
-    return [*confirmed, *inferred]
+    inferred = [
+        item
+        for item in suggested
+        if str(item.get("category") or "") not in confirmed_categories
+    ]
+    return [*confirmed_periodic, *inferred]
 
 
 def _utility_forecast(

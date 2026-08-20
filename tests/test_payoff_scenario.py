@@ -313,7 +313,7 @@ def test_regular_monthly_home_maintenance_stays_in_observed_budget():
     assert maintenance["review_required"] is False
 
 
-def test_mandatory_override_requires_evidence_based_reason():
+def test_non_periodic_mandatory_overrides_are_ignored():
     analysis = _analysis()
     inferred = suggest_budget_baseline(analysis)
     mortgage = next(item for item in inferred if item["category"] == "mortgage")
@@ -321,26 +321,14 @@ def test_mandatory_override_requires_evidence_based_reason():
         **mortgage,
         "monthly_amount": 1000,
         "source": "confirmed",
-        "override_reason": "make it cheaper",
     }
 
-    rejected = reconcile_budget_baseline(analysis, [override])
-    rejected_mortgage = next(
-        item for item in rejected if item["category"] == "mortgage"
+    reconciled = reconcile_budget_baseline(analysis, [override])
+    reconciled_mortgage = next(
+        item for item in reconciled if item["category"] == "mortgage"
     )
-    assert rejected_mortgage["monthly_amount"] == mortgage["monthly_amount"]
-    assert rejected_mortgage["override_status"] == "rejected"
-    assert rejected_mortgage["review_required"] is True
-
-    override["override_reason"] = (
-        "One-time repair deposit was miscategorized as mortgage spending."
-    )
-    accepted = reconcile_budget_baseline(analysis, [override])
-    accepted_mortgage = next(
-        item for item in accepted if item["category"] == "mortgage"
-    )
-    assert accepted_mortgage["monthly_amount"] == 1000
-    assert accepted_mortgage["override_status"] == "accepted"
+    assert reconciled_mortgage["monthly_amount"] == mortgage["monthly_amount"]
+    assert reconciled_mortgage["source"] == "inferred"
 
 
 def test_mortgage_debt_service_cash_outflow_becomes_baseline_item():
@@ -440,7 +428,7 @@ def test_card_payments_and_interest_are_replaced_by_account_minimums():
     } & {item["category"] for item in baseline}
 
 
-def test_observed_mortgages_replace_unjustified_legacy_confirmation():
+def test_observed_mortgages_replace_legacy_confirmation():
     analysis = _analysis()
     analysis["spending_tree"][0]["categories"][0]["subcategories"] = [
         item
@@ -479,13 +467,10 @@ def test_observed_mortgages_replace_unjustified_legacy_confirmation():
         for item in reconciled
         if item["category"] == "mortgage"
     ) == 2630.31
-    mortgage = next(
-        item for item in reconciled if item["category"] == "mortgage"
-    )
-    assert mortgage["override_status"] == "rejected"
+    assert all(item["source"] == "inferred" for item in reconciled)
 
 
-def test_reconcile_refreshes_inferred_and_unjustified_confirmed_values():
+def test_reconcile_refreshes_inferred_and_confirmed_non_periodic_values():
     analysis = _analysis()
     analysis["period_days"] = 180
     mortgage = analysis["spending_tree"][0]["categories"][0]["subcategories"][0]
