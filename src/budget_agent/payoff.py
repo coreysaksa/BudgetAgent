@@ -70,6 +70,7 @@ class _Bucket:
     std_apr: float
     promo_apr: float | None = None
     promo_end: date | None = None
+    payoff_month: str | None = None
 
     def rate(self, on: date) -> float:
         """Monthly interest rate for this bucket in the month ending ``on``."""
@@ -152,8 +153,18 @@ def _pay_card(state: _CardState, amount: float, on: date) -> float:
             break
         pay = min(amount, bucket.remaining)
         bucket.remaining -= pay
+        if bucket.remaining <= _EPSILON and bucket.payoff_month is None:
+            bucket.payoff_month = f"{on.year:04d}-{on.month:02d}"
         amount -= pay
         applied += pay
+    return applied
+
+
+def _pay_bucket(bucket: _Bucket, amount: float, on: date) -> float:
+    applied = min(max(0.0, amount), bucket.remaining)
+    bucket.remaining -= applied
+    if bucket.remaining <= _EPSILON and bucket.payoff_month is None:
+        bucket.payoff_month = f"{on.year:04d}-{on.month:02d}"
     return applied
 
 
@@ -202,11 +213,12 @@ def build_payoff_plan(
         active = [s for s in states if not s.paid]
         required_minimums = {s.card.id: _min_payment(s) for s in active}
 
-        budget = (
-            monthly_budget
-            + (max(0.0, initial_extra_payment) if m == 0 else 0.0)
-            + max(0.0, float(extra_payments_by_month.get(month_label) or 0.0))
+        dated_extra = max(
+            0.0,
+            (initial_extra_payment if m == 0 else 0.0)
+            + float(extra_payments_by_month.get(month_label) or 0.0),
         )
+        budget = monthly_budget + dated_extra
         paid_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
         interest_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
 
@@ -239,15 +251,56 @@ def build_payoff_plan(
                 "minimum payments on all cards."
             )
 
-        # 3) Deadline-driven straight-line funding, earliest deadline first.
-        deadline_cards = sorted(
-            (s for s in active if s.deadline is not None and not s.paid),
-            key=lambda s: s.deadline,  # type: ignore[arg-type,return-value]
+        # 3) Direct dated lump sums to the earliest debt deadlines first.
+        promo_buckets = sorted(
+            (
+                (s, bucket)
+                for s in active
+                for bucket in s.buckets
+                if bucket.promo_end is not None and bucket.remaining > _EPSILON
+            ),
+            key=lambda item: item[1].promo_end,  # type: ignore[arg-type,return-value]
         )
-        for s in deadline_cards:
+        deadline_lump = min(dated_extra, budget)
+        for s, bucket in promo_buckets:
+            if deadline_lump <= _EPSILON:
+                break
+            applied = _pay_bucket(
+                bucket,
+                min(deadline_lump, budget),
+                on,
+            )
+            paid_this_month[s.card.id] += applied
+            deadline_lump -= applied
+            budget -= applied
+
+        explicit_deadline_cards = sorted(
+            (s for s in active if s.card.target_date is not None and not s.paid),
+            key=lambda s: s.card.target_date,  # type: ignore[arg-type,return-value]
+        )
+        for s in explicit_deadline_cards:
+            if deadline_lump <= _EPSILON:
+                break
+            applied = _pay_card(s, min(deadline_lump, budget), on)
+            paid_this_month[s.card.id] += applied
+            deadline_lump -= applied
+            budget -= applied
+
+        # 4) Fund remaining promotional balances at a straight-line pace.
+        for s, bucket in promo_buckets:
             if budget <= _EPSILON:
                 break
-            months_left = max(1, _months_between(on, s.deadline) + 1)  # type: ignore[arg-type]
+            months_left = max(1, _months_between(on, bucket.promo_end) + 1)  # type: ignore[arg-type]
+            need = bucket.remaining / months_left
+            applied = _pay_bucket(bucket, min(need, budget), on)
+            paid_this_month[s.card.id] += applied
+            budget -= applied
+
+        # 5) Fund explicit whole-card deadlines at a straight-line pace.
+        for s in explicit_deadline_cards:
+            if budget <= _EPSILON:
+                break
+            months_left = max(1, _months_between(on, s.card.target_date) + 1)  # type: ignore[arg-type]
             need = s.remaining / months_left
             extra = min(max(0.0, need - paid_this_month[s.card.id]), s.remaining, budget)
             if extra > 0:
@@ -255,7 +308,7 @@ def build_payoff_plan(
                 paid_this_month[s.card.id] += applied
                 budget -= applied
 
-        # 4) Avalanche the rest onto the highest-APR remaining balance.
+        # 6) Avalanche the rest onto the highest-APR remaining balance.
         while budget > _EPSILON:
             candidates = [s for s in active if not s.paid]
             if not candidates:
@@ -297,13 +350,25 @@ def build_payoff_plan(
     card_summaries: list[dict[str, Any]] = []
     feasible = not minimum_shortfall
     for s in states:
-        on_time = True
-        if s.deadline is not None:
+        explicit_on_time = True
+        if s.card.target_date is not None:
             if s.payoff_month is None:
-                on_time = False
+                explicit_on_time = False
             else:
                 py, pm = (int(x) for x in s.payoff_month.split("-"))
-                on_time = date(py, pm, 28) <= _add_months(s.deadline, 0)
+                explicit_on_time = date(py, pm, 1) <= s.card.target_date
+        promo_on_time = all(
+            bucket.payoff_month is not None
+            and date(
+                int(bucket.payoff_month[:4]),
+                int(bucket.payoff_month[5:7]),
+                1,
+            )
+            <= bucket.promo_end
+            for bucket in s.buckets
+            if bucket.promo_end is not None
+        )
+        on_time = explicit_on_time and promo_on_time
         if not on_time:
             feasible = False
             when = s.deadline.isoformat() if s.deadline else "the horizon"

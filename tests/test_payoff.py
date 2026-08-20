@@ -116,6 +116,34 @@ def test_promo_deadline_met_with_sufficient_budget():
     assert plan["feasible"] is True
 
 
+def test_promo_deadline_applies_only_to_promotional_balance():
+    plan = build_payoff_plan(
+        [
+            Card(
+                id="mixed",
+                name="Mixed Balance Card",
+                balance=20000,
+                apr=25,
+                promos=[
+                    Promo(
+                        balance=10000,
+                        apr=0,
+                        end_date=date(2026, 10, 13),
+                    )
+                ],
+            )
+        ],
+        monthly_budget=500,
+        extra_payments_by_month={"2026-09": 10000},
+        start=date(2026, 8, 1),
+    )
+
+    card = plan["cards"][0]
+    assert card["on_time"] is True
+    assert card["payoff_month"] > "2026-10"
+    assert plan["feasible"] is True
+
+
 def test_infeasible_deadline_flagged():
     plan = build_payoff_plan(
         [
