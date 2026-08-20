@@ -1073,6 +1073,42 @@ def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
     assert seen["validate_feasibility"] is False
 
 
+def test_budget_baseline_endpoint_refreshes_fixed_values(monkeypatch):
+    class FakeOrchestrator:
+        def snapshot(self, days=30, **kwargs):
+            assert days == 180
+            return _analysis()
+
+    monkeypatch.setattr(service, "_orchestrator", FakeOrchestrator)
+
+    response = TestClient(service.app).post(
+        "/budget-baseline",
+        json={
+            "budget_baseline": [
+                {
+                    "id": "stale-mortgage",
+                    "name": "Mortgage",
+                    "category": "mortgage",
+                    "kind": "fixed",
+                    "monthly_amount": 1,
+                    "source": "confirmed",
+                    "confidence": "high",
+                    "active": True,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    mortgage = next(
+        item
+        for item in response.json()["budget_baseline"]
+        if item["category"] == "mortgage"
+    )
+    assert mortgage["monthly_amount"] == 1500
+    assert mortgage["source"] == "inferred"
+
+
 def test_portfolio_protects_hard_deadline_then_prioritizes_debt():
     goal_date = _month(date.today(), 6)
     result = build_payoff_scenario(

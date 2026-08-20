@@ -311,6 +311,10 @@ class PayoffScenarioRequest(BaseModel):
     validate_feasibility: bool = True
 
 
+class BudgetBaselineRequest(BaseModel):
+    budget_baseline: list[BudgetBaselineItemInput] = []
+
+
 class MerchantCandidate(BaseModel):
     merchant: str | None = None
     pending_id: str | None = None
@@ -763,6 +767,18 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
             and scenario.get("feasibility", {}).get("status") == "feasible"
         ),
         "scenario": scenario,
+    }
+
+
+@app.post("/budget-baseline")
+def budget_baseline(req: BudgetBaselineRequest) -> dict[str, Any]:
+    """Return current mandatory values while retaining confirmed periodic schedules."""
+    analysis = _guard(lambda: _orchestrator().snapshot(days=180))
+    return {
+        "budget_baseline": reconcile_budget_baseline(
+            analysis,
+            [item.model_dump(mode="json") for item in req.budget_baseline],
+        )
     }
 
 
