@@ -63,7 +63,10 @@ class Transaction(BaseModel):
     date: date
     amount: float  # negative = outflow
     description: str
+    merchant: str | None = None
     category: str | None = None
+    bucket: str | None = None
+    category_group: str | None = None
 
 
 class GoalKind(str, Enum):

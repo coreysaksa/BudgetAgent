@@ -1109,6 +1109,28 @@ def test_budget_baseline_endpoint_refreshes_fixed_values(monkeypatch):
     assert mortgage["source"] == "inferred"
 
 
+def test_transaction_model_preserves_analyzer_classification_evidence():
+    from budget_agent.models import Transaction
+
+    transaction = Transaction.model_validate(
+        {
+            "id": "shellpoint",
+            "account_id": "checking",
+            "date": date.today().isoformat(),
+            "amount": -785.96,
+            "description": "NEWREZ-SHELLPOIN DES:ACH PMT",
+            "merchant": "Shellpoint Mortgage Servicing",
+            "category": "custom_essential",
+            "bucket": "mandatory",
+            "category_group": "housing",
+        }
+    ).model_dump(mode="json")
+
+    assert transaction["merchant"] == "Shellpoint Mortgage Servicing"
+    assert transaction["bucket"] == "mandatory"
+    assert transaction["category_group"] == "housing"
+
+
 def test_portfolio_protects_hard_deadline_then_prioritizes_debt():
     goal_date = _month(date.today(), 6)
     result = build_payoff_scenario(
