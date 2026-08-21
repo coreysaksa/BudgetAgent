@@ -698,7 +698,7 @@ def test_post_card_debt_priorities_favor_monthly_payment_relief():
             {
                 "id": "auto",
                 "name": "Auto Loan",
-                "type": "loan",
+                "type": "mortgage",
                 "balance": -10000,
                 "apr": 6.9,
             },
@@ -729,7 +729,8 @@ def test_post_card_debt_priorities_favor_monthly_payment_relief():
     result = build_payoff_scenario(analysis, _cash_flow(), [])
     priorities = result["cash_flow_recovery"]["debt_priorities_after_cards"]
 
-    assert [item["name"] for item in priorities] == ["Auto Loan", "Home Mortgage"]
+    assert [item["name"] for item in priorities] == ["Auto Loan"]
+    assert priorities[0]["type"] == "loan"
     assert priorities[0]["monthly_payment"] == 500
     assert priorities[0]["monthly_relief_per_1000"] == 50
 

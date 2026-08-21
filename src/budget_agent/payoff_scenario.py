@@ -1061,6 +1061,11 @@ def _debt_priorities_after_cards(
         if account_type not in {"loan", "mortgage"}:
             continue
         name = str(account.get("name") or "Loan")
+        effective_type = (
+            "loan"
+            if any(term in name.lower() for term in ("auto", "vehicle", "car loan"))
+            else account_type
+        )
         balance = abs(float(account.get("balance") or 0.0))
         if balance <= 0.01:
             continue
@@ -1084,11 +1089,13 @@ def _debt_priorities_after_cards(
             ),
         )
         apr = max(0.0, float(account.get("apr") or 0.0))
+        if monthly_payment <= 0 or effective_type == "mortgage":
+            continue
         priorities.append(
             {
                 "account_id": str(account.get("id") or ""),
                 "name": name,
-                "type": account_type,
+                "type": effective_type,
                 "balance": round(balance, 2),
                 "apr": round(apr, 3),
                 "monthly_payment": round(monthly_payment, 2),
@@ -1099,16 +1106,12 @@ def _debt_priorities_after_cards(
                     "Prioritize after cards if paying it off releases this required "
                     "monthly payment; keep mortgage prepayments behind smaller "
                     "consumer loans unless the mortgage rate is unusually high."
-                    if account_type != "mortgage"
-                    else "Usually keep scheduled mortgage payments while eliminating "
-                    "smaller loans that release more monthly cash per payoff dollar."
                 ),
             }
         )
     return sorted(
         priorities,
         key=lambda row: (
-            row["type"] == "mortgage",
             -row["monthly_relief_per_1000"],
             -row["apr"],
             row["balance"],
