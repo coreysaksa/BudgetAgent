@@ -658,9 +658,80 @@ def test_scenario_locks_fixed_bills_and_recommends_discretionary_cut():
     assert by_key["mortgage"]["override_allowed"] is False
     assert by_key["groceries"]["adjustable"] is True
     assert by_key["groceries"]["minimum_monthly"] == 420
+    assert by_key["groceries"]["proposed_monthly"] == 600
     assert by_key["dining"]["proposed_monthly"] == 300
     assert result["safe_monthly_extra"] == 200
     assert result["plan"]["monthly_budget"] == 275
+
+
+def test_extra_income_reserves_recurring_shortfall_before_debt():
+    cash_flow = _cash_flow()
+    cash_flow["recurring_safe_extra_payment"] = 0
+    first = date.today() + timedelta(days=10)
+
+    result = build_payoff_scenario(
+        _analysis(),
+        cash_flow,
+        [],
+        extra_income=[
+            {
+                "name": "Bonus",
+                "amount": 1000,
+                "frequency": "one_time",
+                "first_date": first.isoformat(),
+                "status": "confirmed",
+            }
+        ],
+    )
+
+    stream = result["extra_income"][0]
+    assert result["cash_flow_recovery"]["monthly_shortfall"] == 300
+    assert stream["shortfall_reserve_per_occurrence"] == 900
+    assert stream["debt_amount_per_occurrence"] == 100
+    assert "recurring monthly shortfall" in stream["allocation_rationale"][0]
+
+
+def test_post_card_debt_priorities_favor_monthly_payment_relief():
+    analysis = _analysis()
+    analysis["accounts"].extend(
+        [
+            {
+                "id": "auto",
+                "name": "Auto Loan",
+                "type": "loan",
+                "balance": -10000,
+                "apr": 6.9,
+            },
+            {
+                "id": "home",
+                "name": "Home Mortgage",
+                "type": "mortgage",
+                "balance": -200000,
+                "apr": 4.0,
+            },
+        ]
+    )
+    analysis["debt_service_outflows"] = [
+        {
+            "date": date.today().isoformat(),
+            "amount": 500,
+            "category": "loan payment",
+            "merchant": "Auto Loan",
+        },
+        {
+            "date": date.today().isoformat(),
+            "amount": 1500,
+            "category": "mortgage payment",
+            "merchant": "Home Mortgage",
+        },
+    ]
+
+    result = build_payoff_scenario(analysis, _cash_flow(), [])
+    priorities = result["cash_flow_recovery"]["debt_priorities_after_cards"]
+
+    assert [item["name"] for item in priorities] == ["Auto Loan", "Home Mortgage"]
+    assert priorities[0]["monthly_payment"] == 500
+    assert priorities[0]["monthly_relief_per_1000"] == 50
 
 
 def test_confirmed_baseline_drives_direct_survival_budget():

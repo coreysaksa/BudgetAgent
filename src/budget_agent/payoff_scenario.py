@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar
 import math
+import re
 from datetime import date
 from statistics import median
 from typing import Any, TypedDict
@@ -789,6 +790,7 @@ def _allocate_extra_income_to_goals(
     analysis: dict[str, Any],
     start: date,
     debt_goals: list[dict[str, Any]] | None = None,
+    monthly_shortfall: float = 0.0,
 ) -> tuple[float, float, float, dict[str, float]]:
     candidates = [row for row in rows if row["kind"] != "debt_payoff"]
     remaining = {row["goal_id"]: float(row["remaining"]) for row in candidates}
@@ -819,6 +821,17 @@ def _allocate_extra_income_to_goals(
     goal_total = 0.0
     unassigned_total = 0.0
     debt_payments: dict[str, float] = {}
+    all_occurrences = sorted(
+        {
+            when
+            for stream in streams
+            for when in (
+                _parse_date(item)
+                for item in stream.get("_all_occurrences", stream["occurrences"])
+            )
+            if when is not None
+        }
+    )
     for stream in streams:
         occurrences = [
             when
@@ -831,11 +844,25 @@ def _allocate_extra_income_to_goals(
         amount_each = float(stream["amount"])
         stream_debt = 0.0
         stream_goal = 0.0
+        stream_reserve = 0.0
         allocations: dict[str, float] = {}
         stream_unassigned = 0.0
         rationale: list[str] = []
         for when in occurrences:
             available = amount_each
+            if monthly_shortfall > 0:
+                next_income = next(
+                    (item for item in all_occurrences if item > when),
+                    None,
+                )
+                coverage_months = (
+                    min(3, max(1, math.ceil((next_income - when).days / 30.4375)))
+                    if next_income is not None
+                    else 3
+                )
+                reserve = min(available, monthly_shortfall * coverage_months)
+                available -= reserve
+                stream_reserve += reserve
             for row in sorted(
                 (
                     row
@@ -936,6 +963,12 @@ def _allocate_extra_income_to_goals(
             stream_unassigned += available
         if stream_goal > 0:
             rationale.append("Protects fixed-date and priority goals.")
+        if stream_reserve > 0:
+            rationale.insert(
+                0,
+                "Keeps enough in savings to cover the recurring monthly shortfall "
+                "until the next expected extra-income payment, capped at three months.",
+            )
         if stream_debt > 0:
             rationale.append(
                 "Applies remaining funds to credit cards using the payoff engine's "
@@ -946,6 +979,10 @@ def _allocate_extra_income_to_goals(
         count = max(1, len(occurrences))
         stream["debt_amount_per_occurrence"] = round(stream_debt / count, 2)
         stream["savings_amount_per_occurrence"] = round(stream_goal / count, 2)
+        stream["shortfall_reserve_per_occurrence"] = round(
+            stream_reserve / count, 2
+        )
+        stream["shortfall_reserve_total"] = round(stream_reserve, 2)
         stream["allocation_rationale"] = rationale
         stream["goal_allocations"] = [
             {
@@ -983,6 +1020,99 @@ def _allocate_extra_income_to_goals(
         round(goal_total, 2),
         round(unassigned_total, 2),
         {month: round(amount, 2) for month, amount in debt_payments.items()},
+    )
+
+
+def _debt_service_payment_estimates(analysis: dict[str, Any]) -> dict[str, float]:
+    period_days = max(1.0, float(analysis.get("period_days") or 30.0))
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for payment in analysis.get("debt_service_outflows") or []:
+        category = str(payment.get("category") or "").lower()
+        if category not in {"loan payment", "mortgage payment"}:
+            continue
+        merchant = str(
+            payment.get("matched_account")
+            or payment.get("merchant")
+            or payment.get("description")
+            or category
+        ).strip()
+        groups.setdefault(merchant, []).append(payment)
+    return {
+        merchant: _monthly_spending_estimate(
+            {
+                "total": sum(
+                    abs(float(item.get("amount") or 0.0)) for item in payments
+                ),
+                "transactions": payments,
+            },
+            period_days=period_days,
+        )[0]
+        for merchant, payments in groups.items()
+    }
+
+
+def _debt_priorities_after_cards(
+    analysis: dict[str, Any],
+) -> list[dict[str, Any]]:
+    payment_estimates = _debt_service_payment_estimates(analysis)
+    priorities: list[dict[str, Any]] = []
+    for account in analysis.get("accounts") or []:
+        account_type = str(account.get("type") or "").lower()
+        if account_type not in {"loan", "mortgage"}:
+            continue
+        name = str(account.get("name") or "Loan")
+        balance = abs(float(account.get("balance") or 0.0))
+        if balance <= 0.01:
+            continue
+        name_tokens = set(re.findall(r"[a-z0-9]+", name.lower()))
+        matched_payment = max(
+            (
+                amount
+                for merchant, amount in payment_estimates.items()
+                if name_tokens
+                & set(re.findall(r"[a-z0-9]+", merchant.lower()))
+            ),
+            default=0.0,
+        )
+        monthly_payment = max(
+            0.0,
+            float(
+                account.get("minimum_payment")
+                or account.get("monthly_payment")
+                or matched_payment
+                or 0.0
+            ),
+        )
+        apr = max(0.0, float(account.get("apr") or 0.0))
+        priorities.append(
+            {
+                "account_id": str(account.get("id") or ""),
+                "name": name,
+                "type": account_type,
+                "balance": round(balance, 2),
+                "apr": round(apr, 3),
+                "monthly_payment": round(monthly_payment, 2),
+                "monthly_relief_per_1000": round(
+                    monthly_payment / balance * 1000, 2
+                ),
+                "rationale": (
+                    "Prioritize after cards if paying it off releases this required "
+                    "monthly payment; keep mortgage prepayments behind smaller "
+                    "consumer loans unless the mortgage rate is unusually high."
+                    if account_type != "mortgage"
+                    else "Usually keep scheduled mortgage payments while eliminating "
+                    "smaller loans that release more monthly cash per payoff dollar."
+                ),
+            }
+        )
+    return sorted(
+        priorities,
+        key=lambda row: (
+            row["type"] == "mortgage",
+            -row["monthly_relief_per_1000"],
+            -row["apr"],
+            row["balance"],
+        ),
     )
 
 
@@ -1134,7 +1264,12 @@ def build_payoff_scenario(
         extra_unassigned_total,
         extra_payments,
     ) = _allocate_extra_income_to_goals(
-        streams, portfolio_rows, analysis, today, debt_goals=goals
+        streams,
+        portfolio_rows,
+        analysis,
+        today,
+        debt_goals=goals,
+        monthly_shortfall=max(0.0, -safe_before_floor),
     )
     plan = payoff_from_snapshot(
         analysis,
@@ -1320,6 +1455,69 @@ def build_payoff_scenario(
             ),
         ),
     }
+    shortfall = round(max(0.0, -safe_before_floor), 2)
+    cash_flow_recovery = {
+        "monthly_shortfall": shortfall,
+        "extra_income_reserve_total": round(
+            sum(
+                float(item.get("shortfall_reserve_per_occurrence") or 0.0)
+                * sum(
+                    1
+                    for value in item.get("occurrences") or []
+                    if (
+                        (when := _parse_date(value)) is not None
+                        and when <= _add_months(today, 12)
+                    )
+                )
+                for item in streams
+            ),
+            2,
+        ),
+        "recommended_reductions": [
+            {
+                "key": row["key"],
+                "label": row["label"],
+                "current_monthly": row["current_monthly"],
+                "target_monthly": (
+                    round(max(row["minimum_monthly"], row["current_monthly"] * 0.9), 2)
+                    if row["key"] == "groceries"
+                    and abs(row["proposed_monthly"] - row["current_monthly"]) < 0.01
+                    else row["proposed_monthly"]
+                ),
+                "monthly_savings": round(
+                    row["current_monthly"]
+                    - (
+                        max(row["minimum_monthly"], row["current_monthly"] * 0.9)
+                        if row["key"] == "groceries"
+                        and abs(row["proposed_monthly"] - row["current_monthly"]) < 0.01
+                        else row["proposed_monthly"]
+                    ),
+                    2,
+                ),
+            }
+            for row in spending
+            if row["override_allowed"]
+            and (
+                row["proposed_monthly"] + 0.01 < row["current_monthly"]
+                or row["key"] == "groceries"
+            )
+        ],
+        "debt_priorities_after_cards": _debt_priorities_after_cards(analysis),
+        "guidance": [
+            (
+                "Use confirmed SCA and bonus income as a temporary cash-flow reserve "
+                "before sending the remainder to debt."
+            ),
+            (
+                "Reduce adjustable categories such as groceries and discretionary "
+                "spending until recurring income covers recurring obligations."
+            ),
+            (
+                "After credit cards, prioritize non-mortgage debts that release the "
+                "most required monthly payment for each payoff dollar."
+            ),
+        ],
+    }
     return {
         "regular_monthly_income": round(regular_income, 2),
         "minimum_survival_budget": round(minimum_survival, 2),
@@ -1352,4 +1550,5 @@ def build_payoff_scenario(
         "cash_flow_plan": cash_flow_plan,
         "plan": plan,
         "portfolio_plan": portfolio_plan,
+        "cash_flow_recovery": cash_flow_recovery,
     }
