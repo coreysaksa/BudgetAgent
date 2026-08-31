@@ -749,6 +749,9 @@ def _income_occurrences(
                 "end_date": end.isoformat() if end else None,
                 "dates": [item.isoformat() for item in custom_dates],
                 "status": status,
+                "allocation_target": str(
+                    stream.get("allocation_target") or "auto"
+                ),
                 "debt_amount_per_occurrence": 0.0,
                 "savings_amount_per_occurrence": 0.0,
                 "goal_allocations": [],
@@ -848,6 +851,7 @@ def _allocate_extra_income_to_goals(
         allocations: dict[str, float] = {}
         stream_unassigned = 0.0
         rationale: list[str] = []
+        allocation_target = str(stream.get("allocation_target") or "auto")
         for when in occurrences:
             available = amount_each
             if monthly_shortfall > 0:
@@ -863,6 +867,30 @@ def _allocate_extra_income_to_goals(
                 reserve = min(available, monthly_shortfall * coverage_months)
                 available -= reserve
                 stream_reserve += reserve
+            if allocation_target == "savings" and available > 0:
+                stream_unassigned += available
+                available = 0.0
+            elif allocation_target.startswith("goal:") and available > 0:
+                target_goal_id = allocation_target.split(":", 1)[1]
+                target_row = next(
+                    (
+                        row
+                        for row in candidates
+                        if row["goal_id"] == target_goal_id
+                        and remaining[target_goal_id] > 0
+                    ),
+                    None,
+                )
+                if target_row is not None:
+                    amount = min(available, remaining[target_goal_id])
+                    remaining[target_goal_id] -= amount
+                    available -= amount
+                    allocations[target_goal_id] = (
+                        allocations.get(target_goal_id, 0.0) + amount
+                    )
+                    events[target_goal_id].append((when, amount))
+                    goal_total += amount
+                    stream_goal += amount
             for row in sorted(
                 (
                     row
@@ -962,7 +990,12 @@ def _allocate_extra_income_to_goals(
                 stream_goal += amount
             stream_unassigned += available
         if stream_goal > 0:
-            rationale.append("Protects fixed-date and priority goals.")
+            if allocation_target.startswith("goal:"):
+                rationale.append("Applies extra income to the selected goal first.")
+            else:
+                rationale.append("Protects fixed-date and priority goals.")
+        if allocation_target == "savings" and stream_unassigned > 0:
+            rationale.append("Keeps the available extra income in savings.")
         if stream_reserve > 0:
             rationale.insert(
                 0,
@@ -1281,6 +1314,22 @@ def build_payoff_scenario(
         extra_payments_by_month=extra_payments,
         start=today,
     )
+    regular_income = 0.0
+    scenarios = cash_flow_plan.get("scenarios") or []
+    if scenarios:
+        regular_income = sum(
+            float(item.get("amount") or 0.0)
+            for period in scenarios[0].get("pay_periods") or []
+            for item in period.get("scheduled_income") or []
+            if item.get("category") == "paycheck"
+        )
+    if regular_income <= 0:
+        regular_income = (
+            float(analysis.get("total_inflow") or 0.0)
+            * 30.0
+            / max(1.0, float(analysis.get("period_days") or 30.0))
+        )
+
     reasons: list[str] = []
     advisories: list[str] = []
     unconfirmed_minimums = [
@@ -1338,12 +1387,15 @@ def build_payoff_scenario(
                 f"The requested ${requested_extra:,.2f} monthly extra payment exceeds "
                 f"the calculated safe amount of ${safe_extra:,.2f}."
             )
-    if safe_before_floor < -0.01:
-        reasons.append(
+    shortfall = round(max(0.0, -safe_before_floor), 2)
+    shortfall_reason: str | None = None
+    if shortfall > 0:
+        shortfall_reason = (
             f"Recurring monthly obligations exceed recurring income by "
-            f"${abs(safe_before_floor):,.2f}. Dated extra income is applied on "
+            f"${shortfall:,.2f}. Dated extra income is applied on "
             "its scheduled dates but does not eliminate this monthly shortfall."
         )
+        reasons.append(shortfall_reason)
     behind_goals = [
         row["name"]
         for row in portfolio_rows
@@ -1359,12 +1411,20 @@ def build_payoff_scenario(
         reasons.append("No credit-card balances are available for this plan.")
     elif plan is not None and not plan.get("feasible", True):
         reasons.extend(str(item) for item in plan.get("warnings") or [])
+    underwater_limit = round(min(500.0, max(0.0, regular_income * 0.05)), 2)
+    underwater_eligible = bool(
+        shortfall_reason
+        and shortfall <= underwater_limit + 0.01
+        and reasons == [shortfall_reason]
+    )
     calculated_feasible = not reasons
     status = "unchecked"
     feasible: bool | None = None
     if validate_feasibility:
         feasible = calculated_feasible
         status = "feasible" if feasible else "not_feasible"
+        if underwater_eligible:
+            status = "at_risk"
         if feasible and (uses_estimated or advisories):
             status = "at_risk"
         reasons.extend(advisories)
@@ -1373,21 +1433,6 @@ def build_payoff_scenario(
     else:
         reasons = []
 
-    regular_income = 0.0
-    scenarios = cash_flow_plan.get("scenarios") or []
-    if scenarios:
-        regular_income = sum(
-            float(item.get("amount") or 0.0)
-            for period in scenarios[0].get("pay_periods") or []
-            for item in period.get("scheduled_income") or []
-            if item.get("category") == "paycheck"
-        )
-    if regular_income <= 0:
-        regular_income = (
-            float(analysis.get("total_inflow") or 0.0)
-            * 30.0
-            / max(1.0, float(analysis.get("period_days") or 30.0))
-        )
     direct_survival = float(cash_flow_plan.get("monthly_survival_budget") or 0.0)
     minimum_survival = max(
         0.0,
@@ -1458,7 +1503,6 @@ def build_payoff_scenario(
             ),
         ),
     }
-    shortfall = round(max(0.0, -safe_before_floor), 2)
     cash_flow_recovery = {
         "monthly_shortfall": shortfall,
         "extra_income_reserve_total": round(
@@ -1549,6 +1593,18 @@ def build_payoff_scenario(
             "feasible": feasible,
             "depends_on_estimated_income": uses_estimated,
             "reasons": reasons,
+        },
+        "underwater_approval": {
+            "eligible": underwater_eligible,
+            "monthly_shortfall": shortfall,
+            "limit": underwater_limit,
+            "requires_acknowledgement": underwater_eligible,
+            "reason": (
+                "This is a planning variance, not permission to spend every "
+                "category to its limit. Unused category amounts must absorb the gap."
+                if underwater_eligible
+                else None
+            ),
         },
         "cash_flow_plan": cash_flow_plan,
         "plan": plan,

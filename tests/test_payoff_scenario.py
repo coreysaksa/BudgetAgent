@@ -691,6 +691,78 @@ def test_extra_income_reserves_recurring_shortfall_before_debt():
     assert "recurring monthly shortfall" in stream["allocation_rationale"][0]
 
 
+def test_extra_income_can_be_directed_to_savings():
+    first = date.today() + timedelta(days=10)
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [],
+        extra_income=[
+            {
+                "name": "Bonus",
+                "amount": 1000,
+                "frequency": "one_time",
+                "first_date": first.isoformat(),
+                "status": "confirmed",
+                "allocation_target": "savings",
+            }
+        ],
+    )
+
+    stream = result["extra_income"][0]
+    assert stream["debt_amount_per_occurrence"] == 0
+    assert stream["savings_amount_per_occurrence"] == 0
+    assert stream["unassigned_savings"] == 1000
+    assert result["portfolio_plan"]["extra_income_unassigned"] == 1000
+
+
+def test_extra_income_can_be_directed_to_a_specific_goal():
+    first = date.today() + timedelta(days=10)
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [
+            {
+                "id": "emergency",
+                "name": "Emergency fund",
+                "kind": "savings",
+                "target_amount": 2000,
+            }
+        ],
+        extra_income=[
+            {
+                "name": "Bonus",
+                "amount": 600,
+                "frequency": "one_time",
+                "first_date": first.isoformat(),
+                "status": "confirmed",
+                "allocation_target": "goal:emergency",
+            }
+        ],
+    )
+
+    stream = result["extra_income"][0]
+    assert stream["goal_allocations"] == [
+        {"goal_id": "emergency", "name": "Emergency fund", "amount": 600}
+    ]
+    assert stream["debt_amount_per_occurrence"] == 0
+
+
+def test_small_recurring_shortfall_is_eligible_for_acknowledged_approval():
+    cash_flow = _cash_flow()
+    cash_flow["recurring_safe_extra_payment"] = 250
+    result = build_payoff_scenario(
+        _analysis(),
+        cash_flow,
+        [],
+        validate_feasibility=True,
+    )
+
+    assert result["feasibility"]["status"] == "at_risk"
+    assert result["underwater_approval"]["eligible"] is True
+    assert result["underwater_approval"]["monthly_shortfall"] == 50
+
+
 def test_post_card_debt_priorities_favor_monthly_payment_relief():
     analysis = _analysis()
     analysis["accounts"].extend(

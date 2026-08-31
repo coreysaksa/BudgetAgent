@@ -276,6 +276,7 @@ class ExtraIncomeScenarioInput(BaseModel):
     dates: list[str] = []
     status: str = "estimated"
     debt_percent: float = 100.0
+    allocation_target: str = "auto"
 
 
 class BudgetBaselineItemInput(BaseModel):
@@ -764,7 +765,10 @@ def payoff_scenario(req: PayoffScenarioRequest) -> dict[str, Any]:
         "ready": (
             isinstance(scenario.get("portfolio_plan"), dict)
             and not critical
-            and scenario.get("feasibility", {}).get("status") == "feasible"
+            and (
+                scenario.get("feasibility", {}).get("status") == "feasible"
+                or scenario.get("underwater_approval", {}).get("eligible") is True
+            )
         ),
         "scenario": scenario,
     }
