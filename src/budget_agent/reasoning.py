@@ -129,6 +129,9 @@ def _merge_goal(g: dict[str, Any], prior: dict[str, Any]) -> dict[str, Any]:
         "horizon": horizon,
         "deadline_type": deadline_type,
         "minimum_monthly": pick("minimum_monthly", _to_float, None),
+        "current_amount": pick(
+            "current_amount", lambda v: max(0.0, _to_float(v) or 0.0), 0.0
+        ),
         "status": status,
         "linked_account": pick("linked_account", _to_str, None),
         "target_accounts": pick(
@@ -137,6 +140,17 @@ def _merge_goal(g: dict[str, Any], prior: dict[str, Any]) -> dict[str, Any]:
             if isinstance(v, list)
             else [],
             [],
+        ),
+        "starting_balances": pick(
+            "starting_balances",
+            lambda v: {
+                str(key): max(0.0, _to_float(value) or 0.0)
+                for key, value in v.items()
+                if str(key).strip()
+            }
+            if isinstance(v, dict)
+            else {},
+            {},
         ),
         "milestones": pick("milestones", _parse_milestones, []),
         "notes": pick("notes", _to_str, None),

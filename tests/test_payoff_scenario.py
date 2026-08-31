@@ -748,6 +748,57 @@ def test_extra_income_can_be_directed_to_a_specific_goal():
     assert stream["debt_amount_per_occurrence"] == 0
 
 
+def test_recorded_goal_progress_reduces_required_funding():
+    today = date.today()
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [
+            {
+                "id": "emergency",
+                "name": "Emergency fund",
+                "kind": "savings",
+                "target_amount": 3000,
+                "current_amount": 2400,
+                "target_date": _month(today, 6).isoformat(),
+                "deadline_type": "hard",
+            }
+        ],
+    )
+
+    goal = next(
+        row
+        for row in result["portfolio_plan"]["allocations"]
+        if row["goal_id"] == "emergency"
+    )
+    assert goal["current_amount"] == 2400
+    assert goal["remaining"] == 600
+    assert goal["required_monthly"] == 100
+
+
+def test_debt_portfolio_reports_progress_from_saved_starting_balances():
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [
+            {
+                "id": "cards",
+                "name": "Credit cards",
+                "kind": "debt_payoff",
+                "starting_balances": {"card": 5000},
+            }
+        ],
+    )
+
+    debt = next(
+        row
+        for row in result["portfolio_plan"]["allocations"]
+        if row["kind"] == "debt_payoff"
+    )
+    assert debt["target_amount"] == 5000
+    assert debt["current_amount"] > 0
+
+
 def test_small_recurring_shortfall_is_eligible_for_acknowledged_approval():
     cash_flow = _cash_flow()
     cash_flow["recurring_safe_extra_payment"] = 250

@@ -109,11 +109,13 @@ class Goal(BaseModel):
     horizon: str = "mid"  # "short" | "mid" | "long"
     deadline_type: str = "soft"  # "hard" | "soft" | "none"
     minimum_monthly: float | None = None
+    current_amount: float = 0.0
     status: str = "active"  # "active" | "paused" | "completed"
     # Name (or id) of a savings account whose balance tracks this goal's progress.
     linked_account: str | None = None
     # For debt payoff: the account names/ids being paid down (empty = all credit).
     target_accounts: list[str] = Field(default_factory=list)
+    starting_balances: dict[str, float] = Field(default_factory=dict)
     milestones: list[Milestone] = Field(default_factory=list)
     notes: str | None = None
 

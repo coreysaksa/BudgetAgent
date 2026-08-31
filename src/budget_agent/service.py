@@ -205,9 +205,11 @@ class ChatGoal(BaseModel):
     horizon: str = "mid"
     deadline_type: str = "soft"
     minimum_monthly: float | None = None
+    current_amount: float = 0.0
     status: str = "active"
     linked_account: str | None = None
     target_accounts: list[str] = []
+    starting_balances: dict[str, float] = {}
     milestones: list[ChatMilestone] = []
     notes: str | None = None
 

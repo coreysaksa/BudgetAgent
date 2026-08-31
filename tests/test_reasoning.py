@@ -160,9 +160,11 @@ def test_chat_and_plan_returns_updated_goals():
             "horizon": "mid",
             "deadline_type": "soft",
             "minimum_monthly": None,
+            "current_amount": 0.0,
             "status": "active",
             "linked_account": None,
             "target_accounts": [],
+            "starting_balances": {},
             "milestones": [],
             "notes": None,
         }
@@ -264,9 +266,11 @@ def test_chat_and_plan_drops_nameless_goals():
             "horizon": "mid",
             "deadline_type": "soft",
             "minimum_monthly": None,
+            "current_amount": 0.0,
             "status": "active",
             "linked_account": None,
             "target_accounts": [],
+            "starting_balances": {},
             "milestones": [],
             "notes": None,
         }

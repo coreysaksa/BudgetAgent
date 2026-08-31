@@ -1446,6 +1446,29 @@ def build_payoff_scenario(
     if plan is not None:
         plan["minimum_payment_total"] = round(minimum_total, 2)
         plan["safe_extra_payment"] = round(safe_extra, 2)
+        debt_goals = [
+            goal
+            for goal in goals
+            if str(goal.get("kind") or "").lower() == "debt_payoff"
+            and str(goal.get("status") or "active").lower() == "active"
+        ]
+        debt_goal = debt_goals[0] if debt_goals else {}
+        saved_starts = (
+            debt_goal.get("starting_balances")
+            if isinstance(debt_goal.get("starting_balances"), dict)
+            else {}
+        )
+        debt_target = 0.0
+        debt_progress = 0.0
+        for card in plan.get("cards") or []:
+            live_balance = float(card.get("starting_balance") or 0.0)
+            baseline = saved_starts.get(
+                str(card.get("id") or ""),
+                saved_starts.get(str(card.get("name") or "")),
+            )
+            starting = max(live_balance, float(baseline or live_balance))
+            debt_target += starting
+            debt_progress += max(0.0, starting - live_balance)
         portfolio_rows.append(
             {
                 "goal_id": "credit-card-payoff",
@@ -1463,11 +1486,8 @@ def build_payoff_scenario(
                 "deadline_type": "hard"
                 if any(card.get("deadline") for card in plan.get("cards") or [])
                 else "soft",
-                "target_amount": round(
-                    sum(float(card.get("starting_balance") or 0.0) for card in plan["cards"]),
-                    2,
-                ),
-                "current_amount": 0.0,
+                "target_amount": round(debt_target, 2),
+                "current_amount": round(debt_progress, 2),
                 "remaining": round(
                     sum(float(card.get("starting_balance") or 0.0) for card in plan["cards"]),
                     2,
