@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from budget_agent.approval import ApprovalPolicy
 from budget_agent.models import Goal
@@ -192,8 +193,5 @@ def test_execute_dry_run_rejects_over_guardrail_even_if_approved():
 def test_execute_live_is_deferred():
     orch = _build()
     rec = orch.recommend([])
-    try:
+    with pytest.raises(NotImplementedError):
         orch.execute(rec.proposed_actions, approvals={}, dry_run=False)
-        assert False, "expected NotImplementedError"
-    except NotImplementedError:
-        pass

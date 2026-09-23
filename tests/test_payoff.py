@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 from budget_agent.payoff import (
     Card,
@@ -25,6 +26,62 @@ def test_single_card_pays_off_no_interest():
     assert summary["payoff_month"] == "2026-08"
     # Every dollar of the balance is eventually paid.
     assert plan["total_paid"] >= 1000.0
+
+
+def test_payoff_rounds_fractional_cent_inputs_once_at_the_money_boundary():
+    plan = build_payoff_plan(
+        [Card(id="a", name="Card A", balance=100.005, apr=0.0)],
+        monthly_budget=33.335,
+        start=START,
+    )
+
+    assert plan["monthly_budget"] == 33.34
+    assert plan["cards"][0]["starting_balance"] == 100.01
+    assert [row["total_payment"] for row in plan["schedule"]] == [
+        33.34,
+        33.34,
+        33.33,
+    ]
+    assert plan["total_paid"] == 100.01
+
+
+def test_monthly_interest_is_rounded_to_cents_before_it_is_compounded():
+    plan = build_payoff_plan(
+        [Card(id="a", name="Card A", balance=1000.0, apr=12.0)],
+        monthly_budget=510.0,
+        start=START,
+    )
+
+    assert [row["payments"][0]["interest"] for row in plan["schedule"]] == [
+        10.0,
+        5.0,
+    ]
+    assert plan["total_interest"] == 15.0
+    assert plan["total_paid"] == 1015.0
+
+
+def test_schedule_and_plan_payment_totals_reconcile_exactly_to_cents():
+    plan = build_payoff_plan(
+        [
+            Card(id="a", name="Card A", balance=987.65, apr=19.99),
+            Card(id="b", name="Card B", balance=432.10, apr=7.25),
+        ],
+        monthly_budget=217.43,
+        initial_extra_payment=19.995,
+        start=START,
+    )
+
+    scheduled = sum(
+        (Decimal(str(row["total_payment"])) for row in plan["schedule"]),
+        start=Decimal("0"),
+    )
+    assert scheduled == Decimal(str(plan["total_paid"]))
+    for month in plan["schedule"]:
+        card_payments = sum(
+            (Decimal(str(item["payment"])) for item in month["payments"]),
+            start=Decimal("0"),
+        )
+        assert card_payments == Decimal(str(month["total_payment"]))
 
 
 def test_initial_extra_payment_applies_only_to_first_month():

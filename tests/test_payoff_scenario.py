@@ -5,11 +5,15 @@ from fastapi.testclient import TestClient
 
 from budget_agent import service
 from budget_agent.payoff_scenario import (
+    _calculate_scenario_capacity,
+    _evaluate_scenario_feasibility,
+    _goal_allocation_rows,
     build_payoff_scenario,
     reconcile_budget_baseline,
     suggest_budget_baseline,
     suggest_extra_income,
 )
+from budget_agent.payoff_scenario_types import ScenarioCapacity, ScenarioFeasibility
 
 
 def _analysis():
@@ -75,6 +79,48 @@ def _month(value: date, offset: int) -> date:
     total = value.year * 12 + value.month - 1 + offset
     year, month_index = divmod(total, 12)
     return date(year, month_index + 1, 15)
+
+
+def test_goal_deadline_funding_uses_calendar_months_not_average_day_length():
+    today = date(2026, 9, 9)
+    goal = {
+        "target_amount": 600,
+        "current_amount": 0,
+        "target_date": "2027-03-15",
+        "deadline_type": "hard",
+    }
+
+    rows, _ = _goal_allocation_rows(
+        [goal],
+        {},
+        capacity=1000,
+        debt_allocation_percent=0,
+        today=today,
+        has_debt=False,
+    )
+
+    assert rows[0]["required_monthly"] == 100
+
+
+def test_scenario_stages_expose_typed_capacity_and_feasibility_results():
+    capacity = _calculate_scenario_capacity(
+        _analysis(),
+        _cash_flow(),
+        [],
+        today=date(2026, 9, 9),
+    )
+    feasibility = _evaluate_scenario_feasibility(
+        _analysis(),
+        _cash_flow(),
+        capacity,
+        validate_feasibility=True,
+    )
+
+    assert isinstance(capacity, ScenarioCapacity)
+    assert capacity.safe_extra == 200
+    assert isinstance(feasibility, ScenarioFeasibility)
+    assert feasibility.status == "feasible"
+    assert feasibility.feasible is True
 
 
 def _with_utilities(

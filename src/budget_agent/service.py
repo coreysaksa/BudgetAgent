@@ -8,7 +8,6 @@ live money-movement integration remains deferred (high risk). See approval.py.
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
 from datetime import date
 from functools import lru_cache
 from typing import Any, Callable
@@ -28,8 +27,12 @@ from pydantic import (
 )
 
 from .approval import ApprovalPolicy, MoneyAction
+from .chat_workflow import (
+    ChatCommand,
+    ChatWorkflow,
+)
 from .config import Settings
-from .lookback import MAX_LOOKBACK_DAYS, resolve_lookback_days
+from .lookback import MAX_LOOKBACK_DAYS
 from .models import (
     BudgetPlan,
     Goal,
@@ -328,123 +331,6 @@ class AdjudicateRequest(BaseModel):
     candidates: list[MerchantCandidate] = []
 
 
-def _trim_spending_tree(analysis: dict[str, Any], max_txns_per_sub: int = 8) -> None:
-    """Cap the per-subcategory transaction lists so the chat prompt stays bounded.
-
-    The analyzer embeds every transaction in ``spending_tree`` for the drill-down
-    UI; the chat only needs the bucket/category/subcategory totals plus a few
-    example transactions to spot savings, so keep the largest handful per leaf.
-    """
-    tree = analysis.get("spending_tree")
-    if not isinstance(tree, list):
-        return
-    for bucket in tree:
-        for category in bucket.get("categories", []):
-            for sub in category.get("subcategories", []):
-                txns = sub.get("transactions") or []
-                if len(txns) > max_txns_per_sub:
-                    sub["transactions"] = txns[:max_txns_per_sub]
-                    sub["transactions_truncated"] = len(txns)
-
-
-def _selected_month_lookback(selected_month: str | None) -> int:
-    if not selected_month:
-        return 0
-    month_start = date.fromisoformat(f"{selected_month}-01")
-    today = date.today()
-    if month_start > today:
-        return 0
-    return min(MAX_LOOKBACK_DAYS, (today - month_start).days + 1)
-
-
-def _has_cash_flow_context(message: str, history: list[dict[str, str]]) -> bool:
-    text = " ".join(
-        [turn.get("content", "") for turn in history if turn.get("role") == "user"]
-        + [message]
-    ).lower()
-    return any(
-        term in text
-        for term in (
-            "credit card",
-            "payoff",
-            "paycheck",
-            "pay day",
-            "paid on",
-            "bonus",
-            "windfall",
-            "allowance",
-            "security clearance",
-            "sca",
-            "mandatory",
-            "discretionary",
-            "survive",
-        )
-    )
-
-
-def _requests_payoff_plan(message: str) -> bool:
-    user_text = message.lower()
-    return any(
-        phrase in user_text
-        for phrase in (
-            "credit card payoff plan",
-            "credit-card payoff plan",
-            "credit card pay off plan",
-            "payoff plan for my credit card",
-            "payoff plan for my cards",
-            "pay off plan for my credit card",
-            "pay off plan for my cards",
-            "plan to pay off my credit card",
-            "plan to pay off my cards",
-            "help me pay off my credit card",
-            "help me pay off my cards",
-            "recalculate my credit card payoff",
-            "update my credit card payoff",
-        )
-    )
-
-
-def _merge_windfalls(
-    requested: list[Windfall], extracted: list[Windfall]
-) -> list[Windfall]:
-    merged: list[Windfall] = []
-    seen: set[tuple[str, float, str]] = set()
-    for item in [*requested, *extracted]:
-        key = (item.name.strip().lower(), round(item.amount, 2), item.date.isoformat())
-        if key not in seen:
-            seen.add(key)
-            merged.append(item)
-    return merged
-
-
-def _suppress_draft_debt_goal_changes(
-    result: dict[str, Any], current_goals: list[dict[str, Any]]
-) -> None:
-    if not result.get("goals_updated") or not isinstance(result.get("goals"), list):
-        return
-    current_debt = {
-        str(goal.get("id") or goal.get("name") or "").strip().lower(): goal
-        for goal in current_goals
-        if goal.get("kind") == "debt_payoff"
-    }
-    filtered: list[dict[str, Any]] = []
-    seen_debt: set[str] = set()
-    for goal in result["goals"]:
-        if not isinstance(goal, dict):
-            continue
-        if goal.get("kind") != "debt_payoff":
-            filtered.append(goal)
-            continue
-        key = str(goal.get("id") or goal.get("name") or "").strip().lower()
-        prior = current_debt.get(key)
-        if prior is not None:
-            filtered.append(prior)
-            seen_debt.add(key)
-    filtered.extend(goal for key, goal in current_debt.items() if key not in seen_debt)
-    result["goals"] = filtered
-    result["goals_updated"] = filtered != current_goals
-
-
 @app.post("/chat")
 def chat(req: ChatRequest) -> dict[str, Any]:
     """Conversational finance chat that can also build a plan and manage the
@@ -461,222 +347,29 @@ def chat(req: ChatRequest) -> dict[str, Any]:
             status_code=503,
             detail="Azure OpenAI is not configured (set AZURE_OPENAI_ENDPOINT).",
         )
-    # Let the user widen the window conversationally ("looking back 60 days",
-    # "past 6 months", "last quarter"); default to 30 days when they don't ask.
-    # The window is sticky across turns: a follow-up that doesn't restate the
-    # window keeps the last one the user named instead of snapping back to 30.
-    conversational_lookback = resolve_lookback_days(req.message, req.history)
-    selected_month = req.page_context.selected_month if req.page_context else None
-    lookback_days = max(
-        conversational_lookback,
-        _selected_month_lookback(selected_month),
-    )
-    route = req.page_context.route if req.page_context else None
-    scoped_month = (
-        selected_month
-        if selected_month
-        and route
-        and (
-            route.startswith("/app/overview")
-            or route.startswith("/app/transactions")
-        )
-        else None
-    )
-    try:
-        if scoped_month:
-            analysis = _orchestrator().snapshot(
-                days=lookback_days,
-                month=scoped_month,
-            )
-        else:
-            analysis = _orchestrator().snapshot(days=lookback_days)
-        data_status: dict[str, Any] = {"ok": True, "lookback_days": lookback_days}
-    except Exception as exc:  # noqa: BLE001 - chat degrades gracefully without a snapshot
-        # Don't swallow this silently: an aggregator/analyzer outage would
-        # otherwise look identical to "no accounts connected" to the model. But a
-        # transient upstream rate-limit (429) is expected and self-healing, so log
-        # it without a stack trace to avoid tripping error-log alerts.
-        if _is_transient_upstream(exc):
-            _log.warning(
-                "chat snapshot unavailable (lookback=%sd, upstream busy): %s",
-                lookback_days,
-                exc,
-            )
-        else:
-            _log.warning(
-                "chat snapshot failed (lookback=%sd): %s",
-                lookback_days,
-                exc,
-                exc_info=True,
-            )
-        analysis = {}
-        data_status = {
-            "ok": False,
-            "lookback_days": lookback_days,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    planner_analysis = deepcopy(analysis) if analysis else {}
-    if analysis:
-        _trim_spending_tree(analysis)
-        analysis["lookback_days"] = lookback_days
     history = [{"role": m.role, "content": m.content} for m in req.history]
-    current_goals = [g.model_dump() for g in req.goals]
-    extracted: dict[str, Any] = {
-        "windfalls": [],
-        "paychecks": [],
-        "necessity_overrides": [],
-        "clarifications": [],
-    }
-    payoff_context = req.payoff_plan_active or _requests_payoff_plan(req.message)
-    if analysis and payoff_context:
-        try:
-            extracted = reasoner.extract_cash_flow_inputs(req.message, history)
-        except Exception as exc:  # noqa: BLE001 - base chat remains available
-            _log.warning("cash-flow input extraction unavailable: %s", exc)
-    payoff_plan: dict[str, Any] | None = None
-    payoff_scenario: dict[str, Any] | None = None
-    cash_flow_plan: dict[str, Any] | None = None
-    payoff_ready = False
-    if analysis and payoff_context:
-        try:
-            try:
-                utility_history = _orchestrator().snapshot(days=730)
-            except Exception as exc:  # noqa: BLE001 - payoff chat can use fallback reserve
-                _log.warning("utility history unavailable for payoff chat: %s", exc)
-                utility_history = None
-            structured_windfalls = _merge_windfalls(
-                req.windfalls,
-                [Windfall.model_validate(item) for item in extracted["windfalls"]],
-            )
-            baseline = reconcile_budget_baseline(
-                planner_analysis,
-                req.budget_baseline,
-            )
-            cash_flow_plan = _orchestrator().cash_flow_plan(
-                planner_analysis,
-                structured_windfalls,
-                checking_buffer=req.checking_buffer,
-                paychecks=[
-                    PaycheckInput.model_validate(item) for item in extracted["paychecks"]
-                ],
-                necessity_overrides=[
-                    NecessityOverride.model_validate(item)
-                    for item in extracted["necessity_overrides"]
-                ],
-                budget_baseline=baseline,
-            )
-            baseline_cash_flow = _orchestrator().cash_flow_plan(
-                planner_analysis,
-                [],
-                checking_buffer=req.checking_buffer,
-                paychecks=[
-                    PaycheckInput.model_validate(item) for item in extracted["paychecks"]
-                ],
-                necessity_overrides=[
-                    NecessityOverride.model_validate(item)
-                    for item in extracted["necessity_overrides"]
-                ],
-                budget_baseline=baseline,
-            )
-            cash_flow_plan.setdefault("clarification_questions", []).extend(
-                {
-                    "code": "missing-conversation-input",
-                    "question": question,
-                    "context": None,
-                    "critical": True,
-                }
-                for question in extracted["clarifications"]
-            )
-            analysis["cash_flow_plan"] = cash_flow_plan
-            minimum_total = sum(
-                max(0.0, float(account.get("minimum_payment") or 0.0))
-                for account in planner_analysis.get("accounts") or []
-                if account.get("type") == "credit"
-            )
-            baseline_extra = max(
-                0.0,
-                float(
-                    baseline_cash_flow.get("recurring_safe_extra_payment") or 0.0
-                ),
-            )
-            payoff_scenario = build_payoff_scenario(
-                planner_analysis,
-                baseline_cash_flow,
-                [],
-                utility_history=utility_history,
-                extra_income=(
-                    req.extra_income
-                    or [
-                        {
-                            "name": item.name,
-                            "amount": item.amount,
-                            "frequency": "one_time",
-                            "first_date": item.date.isoformat(),
-                            "status": item.status,
-                        }
-                        for item in structured_windfalls
-                    ]
-                ),
-                budget_baseline=baseline,
-                validate_feasibility=False,
-            )
-            analysis["budget_baseline"] = baseline
-            analysis["extra_income_allocations"] = payoff_scenario.get(
-                "extra_income", []
-            )
-            payoff_plan = payoff_scenario.get("plan")
-            critical_questions = [
-                item
-                for item in cash_flow_plan.get("clarification_questions") or []
-                if item.get("critical")
-            ]
-            payoff_ready = payoff_plan is not None and not critical_questions
-            payoff_ready = payoff_ready and (
-                payoff_scenario.get("feasibility", {}).get("status") == "feasible"
-            )
-            if payoff_plan is not None:
-                payoff_plan["minimum_payment_total"] = round(minimum_total, 2)
-                payoff_plan["safe_extra_payment"] = round(baseline_extra, 2)
-                payoff_plan["initial_extra_payment"] = round(
-                    float(
-                        payoff_scenario.get("extra_payments_by_month", {}).get(
-                            date.today().strftime("%Y-%m"), 0.0
-                        )
-                    ),
-                    2,
-                )
-                prompt_plan = payoff_plan
-                sched = payoff_plan.get("schedule") or []
-                if len(sched) > 24:
-                    prompt_plan = {
-                        **payoff_plan,
-                        "schedule": sched[:24],
-                        "schedule_truncated": True,
-                    }
-                analysis["debt_payoff_plan"] = prompt_plan
-        except Exception as exc:  # noqa: BLE001 - chat remains usable without this plan
-            _log.warning("cash-flow plan unavailable for chat: %s", exc)
-    # Always surface how the data load went so the model can distinguish a
-    # temporary fetch failure from a genuinely empty account set.
-    analysis = analysis or {}
-    if req.page_context is not None:
-        analysis["page_context"] = req.page_context.model_dump(exclude_none=True)
-    analysis["data_status"] = data_status
-    result = _guard(
-        lambda: reasoner.chat_and_plan(req.message, analysis, history, current_goals)
+    command = ChatCommand(
+        message=req.message,
+        history=history,
+        goals=[goal.model_dump() for goal in req.goals],
+        windfalls=req.windfalls,
+        extra_income=req.extra_income,
+        budget_baseline=req.budget_baseline,
+        checking_buffer=req.checking_buffer,
+        payoff_plan_active=req.payoff_plan_active,
+        page_context=(
+            req.page_context.model_dump(exclude_none=True)
+            if req.page_context is not None
+            else None
+        ),
     )
-    if payoff_context:
-        _suppress_draft_debt_goal_changes(result, current_goals)
-    result.update(
-        {
-            "payoff_plan_status": "draft" if payoff_plan is not None else "none",
-            "payoff_plan_ready": payoff_ready,
-            "payoff_plan": payoff_plan,
-            "cash_flow_plan": cash_flow_plan,
-            "payoff_scenario": payoff_scenario,
-        }
+    workflow = ChatWorkflow(
+        _orchestrator(),
+        reasoner,
+        build_payoff_scenario,
+        _is_transient_upstream,
     )
-    return result
+    return _guard(lambda: workflow.execute(command))
 
 
 @app.post("/adjudicate-merchants")

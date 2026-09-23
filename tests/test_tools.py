@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from budget_agent.models import Goal, NecessityOverride, PaycheckInput
 from budget_agent.tools import AggregatorClient, AnalyzerClient, PlannerClient
@@ -85,11 +86,8 @@ def test_analyzer_analyze_posts_payload_and_returns_dict():
 
 def test_analyzer_progress_not_implemented():
     client = AnalyzerClient("http://ana")
-    try:
+    with pytest.raises(NotImplementedError):
         client.progress(None)  # type: ignore[arg-type]
-        assert False, "expected NotImplementedError"
-    except NotImplementedError:
-        pass
 
 
 def test_planner_build_plan_derives_fields():
@@ -181,8 +179,5 @@ def test_client_raises_on_http_error():
         return httpx.Response(500, json={"detail": "boom"})
 
     client = AggregatorClient("http://agg", transport=_transport(handler))
-    try:
+    with pytest.raises(httpx.HTTPStatusError):
         client.get_accounts()
-        assert False, "expected HTTPStatusError"
-    except httpx.HTTPStatusError:
-        pass

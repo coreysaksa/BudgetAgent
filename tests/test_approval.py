@@ -1,3 +1,5 @@
+import pytest
+
 from budget_agent.approval import ApprovalPolicy, ApprovalRequired, MoneyAction
 
 
@@ -8,11 +10,8 @@ def _action(kind="transfer", amount=100.0):
 
 def test_transfer_requires_approval_by_default():
     policy = ApprovalPolicy(require_approval=True)
-    try:
+    with pytest.raises(ApprovalRequired):
         policy.guard(_action())
-        assert False, "expected ApprovalRequired"
-    except ApprovalRequired:
-        pass
 
 
 def test_human_approval_allows_action():
@@ -26,8 +25,5 @@ def test_capped_petty_cash_topup_auto_allowed():
 
 def test_over_cap_topup_still_requires_approval():
     policy = ApprovalPolicy(require_approval=True, auto_topup_cap=100.0)
-    try:
+    with pytest.raises(ApprovalRequired):
         policy.guard(_action(kind="petty_cash_topup", amount=150.0))
-        assert False, "expected ApprovalRequired"
-    except ApprovalRequired:
-        pass

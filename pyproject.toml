@@ -34,4 +34,4 @@ line-length = 100
 # CI even though the code was unchanged. Selecting ruff's classic default set
 # keeps linting deterministic across ruff versions; opt into more rules
 # deliberately rather than inheriting whatever a future ruff enables by default.
-select = ["E4", "E7", "E9", "F"]
+select = ["E4", "E7", "E9", "F", "B"]

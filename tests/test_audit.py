@@ -1,3 +1,5 @@
+import pytest
+
 from budget_agent.approval import ApprovalPolicy, ApprovalRequired, MoneyAction
 from budget_agent.audit import AuditLog
 
@@ -24,11 +26,8 @@ def test_records_auto_approved():
 
 def test_records_denied_and_raises():
     log = AuditLog()
-    try:
+    with pytest.raises(ApprovalRequired):
         ApprovalPolicy(require_approval=True).guard(_action(), audit=log)
-        assert False, "expected ApprovalRequired"
-    except ApprovalRequired:
-        pass
     assert log.entries[0].decision == "denied"
 
 
@@ -43,11 +42,8 @@ def test_log_is_append_only_and_ordered():
 
 def test_record_rejects_unknown_decision():
     log = AuditLog()
-    try:
+    with pytest.raises(ValueError):
         log.record(_action(), "maybe")
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
 
 
 def test_guard_without_audit_still_works():

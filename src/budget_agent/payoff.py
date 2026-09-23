@@ -27,14 +27,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
+from .money import HALF_CENT, ZERO, decimal_value, json_money, money, money_up
+
 # Below this residual balance a card is considered paid off (rounding dust).
-_EPSILON = 0.005
+_EPSILON = HALF_CENT
 # Default horizon so an under-funded plan terminates instead of looping forever.
 _DEFAULT_HORIZON = 120
-_MIN_PAYMENT_FLOOR = 25.0
-_MIN_PAYMENT_RATE = 0.01  # 1% of the balance, a common card minimum.
+_MIN_PAYMENT_FLOOR = Decimal("25.00")
+_MIN_PAYMENT_RATE = Decimal("0.01")  # 1% of the balance, a common card minimum.
 
 
 @dataclass
@@ -66,20 +69,20 @@ class Card:
 class _Bucket:
     """A slice of a card's balance that accrues at a single APR at a time."""
 
-    remaining: float
-    std_apr: float
-    promo_apr: float | None = None
+    remaining: Decimal
+    std_apr: Decimal
+    promo_apr: Decimal | None = None
     promo_end: date | None = None
     payoff_month: str | None = None
 
-    def rate(self, on: date) -> float:
+    def rate(self, on: date) -> Decimal:
         """Monthly interest rate for this bucket in the month ending ``on``."""
         if self.promo_apr is not None and (self.promo_end is None or on <= self.promo_end):
-            return self.promo_apr / 1200.0
-        return self.std_apr / 1200.0
+            return self.promo_apr / Decimal("1200")
+        return self.std_apr / Decimal("1200")
 
-    def effective_apr(self, on: date) -> float:
-        return self.rate(on) * 1200.0
+    def effective_apr(self, on: date) -> Decimal:
+        return self.rate(on) * Decimal("1200")
 
 
 @dataclass
@@ -87,12 +90,12 @@ class _CardState:
     card: Card
     deadline: date | None
     buckets: list[_Bucket]
-    total_interest: float = 0.0
+    total_interest: Decimal = ZERO
     payoff_month: str | None = None
 
     @property
-    def remaining(self) -> float:
-        return sum(b.remaining for b in self.buckets)
+    def remaining(self) -> Decimal:
+        return sum((b.remaining for b in self.buckets), start=ZERO)
 
     @property
     def paid(self) -> bool:
@@ -124,35 +127,47 @@ def _card_deadline(card: Card) -> date | None:
 def _build_buckets(card: Card) -> list[_Bucket]:
     """Split a card into a standard bucket plus one bucket per promo, capped so
     the promo balances never exceed the total owed."""
-    promo_total = sum(max(0.0, p.balance) for p in card.promos)
-    std = max(0.0, card.balance - promo_total)
+    card_balance = money(max(0.0, card.balance))
+    promo_balances = [money(max(0.0, promo.balance)) for promo in card.promos]
+    promo_total = sum(promo_balances, start=ZERO)
+    std = max(ZERO, card_balance - promo_total)
     buckets: list[_Bucket] = []
-    if std > 0:
-        buckets.append(_Bucket(remaining=std, std_apr=card.apr))
-    for p in card.promos:
-        bal = max(0.0, p.balance)
-        if bal <= 0:
+    standard_apr = decimal_value(card.apr)
+    if std > ZERO:
+        buckets.append(_Bucket(remaining=std, std_apr=standard_apr))
+    for promo, promo_balance in zip(
+        card.promos,
+        promo_balances,
+        strict=True,
+    ):
+        bal = promo_balance
+        if bal <= ZERO:
             continue
         # If promos over-count the balance, scale them down proportionally.
-        if promo_total > card.balance and promo_total > 0:
-            bal *= card.balance / promo_total
+        if promo_total > card_balance and promo_total > ZERO:
+            bal = money(bal * card_balance / promo_total)
         buckets.append(
-            _Bucket(remaining=bal, std_apr=card.apr, promo_apr=p.apr, promo_end=p.end_date)
+            _Bucket(
+                remaining=bal,
+                std_apr=standard_apr,
+                promo_apr=decimal_value(promo.apr),
+                promo_end=promo.end_date,
+            )
         )
     if not buckets:
-        buckets.append(_Bucket(remaining=max(0.0, card.balance), std_apr=card.apr))
+        buckets.append(_Bucket(remaining=card_balance, std_apr=standard_apr))
     return buckets
 
 
-def _pay_card(state: _CardState, amount: float, on: date) -> float:
+def _pay_card(state: _CardState, amount: Decimal, on: date) -> Decimal:
     """Apply ``amount`` to a card, highest effective APR first. Returns the amount
     actually applied (may be less if the card is smaller than ``amount``)."""
-    applied = 0.0
+    applied = ZERO
     for bucket in sorted(state.buckets, key=lambda b: b.effective_apr(on), reverse=True):
         if amount <= _EPSILON:
             break
-        pay = min(amount, bucket.remaining)
-        bucket.remaining -= pay
+        pay = money(min(amount, bucket.remaining))
+        bucket.remaining = money(bucket.remaining - pay)
         if bucket.remaining <= _EPSILON and bucket.payoff_month is None:
             bucket.payoff_month = f"{on.year:04d}-{on.month:02d}"
         amount -= pay
@@ -160,18 +175,18 @@ def _pay_card(state: _CardState, amount: float, on: date) -> float:
     return applied
 
 
-def _pay_bucket(bucket: _Bucket, amount: float, on: date) -> float:
-    applied = min(max(0.0, amount), bucket.remaining)
-    bucket.remaining -= applied
+def _pay_bucket(bucket: _Bucket, amount: Decimal, on: date) -> Decimal:
+    applied = money(min(max(ZERO, amount), bucket.remaining))
+    bucket.remaining = money(bucket.remaining - applied)
     if bucket.remaining <= _EPSILON and bucket.payoff_month is None:
         bucket.payoff_month = f"{on.year:04d}-{on.month:02d}"
     return applied
 
 
-def _min_payment(state: _CardState) -> float:
+def _min_payment(state: _CardState) -> Decimal:
     card = state.card
-    floor = card.min_payment if card.min_payment is not None else max(
-        _MIN_PAYMENT_FLOOR, _MIN_PAYMENT_RATE * state.remaining
+    floor = money(card.min_payment) if card.min_payment is not None else max(
+        _MIN_PAYMENT_FLOOR, money(_MIN_PAYMENT_RATE * state.remaining)
     )
     return min(floor, state.remaining)
 
@@ -195,15 +210,17 @@ def build_payoff_plan(
     states = [
         _CardState(card=c, deadline=_card_deadline(c), buckets=_build_buckets(c))
         for c in cards
-        if c.balance > _EPSILON
+        if money(c.balance) > _EPSILON
     ]
 
     warnings: list[str] = []
     schedule: list[dict[str, Any]] = []
-    total_interest = 0.0
-    total_paid = 0.0
+    total_interest = ZERO
+    total_paid = ZERO
     minimum_shortfall = False
     extra_payments_by_month = extra_payments_by_month or {}
+    monthly_budget_amount = money(max(ZERO, decimal_value(monthly_budget)))
+    initial_extra_amount = money(max(ZERO, decimal_value(initial_extra_payment)))
 
     for m in range(horizon_months):
         if all(s.paid for s in states):
@@ -214,20 +231,20 @@ def build_payoff_plan(
         required_minimums = {s.card.id: _min_payment(s) for s in active}
 
         dated_extra = max(
-            0.0,
-            (initial_extra_payment if m == 0 else 0.0)
-            + float(extra_payments_by_month.get(month_label) or 0.0),
+            ZERO,
+            (initial_extra_amount if m == 0 else ZERO)
+            + money(extra_payments_by_month.get(month_label)),
         )
-        budget = monthly_budget + dated_extra
-        paid_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
-        interest_this_month: dict[str, float] = {s.card.id: 0.0 for s in active}
+        budget = monthly_budget_amount + dated_extra
+        paid_this_month: dict[str, Decimal] = {s.card.id: ZERO for s in active}
+        interest_this_month: dict[str, Decimal] = {s.card.id: ZERO for s in active}
 
         # 1) Accrue interest.
         for s in active:
-            month_interest = 0.0
+            month_interest = ZERO
             for b in s.buckets:
-                interest = b.remaining * b.rate(on)
-                b.remaining += interest
+                interest = money(b.remaining * b.rate(on))
+                b.remaining = money(b.remaining + interest)
                 month_interest += interest
             s.total_interest += month_interest
             total_interest += month_interest
@@ -236,10 +253,10 @@ def build_payoff_plan(
         # 2) Minimum payments on every card.
         for s in active:
             pay = min(required_minimums[s.card.id], budget)
-            if pay > 0:
-                _pay_card(s, pay, on)
-                paid_this_month[s.card.id] += pay
-                budget -= pay
+            if pay > ZERO:
+                applied = _pay_card(s, pay, on)
+                paid_this_month[s.card.id] += applied
+                budget -= applied
         if any(
             required_minimums[s.card.id]
             > paid_this_month[s.card.id] + _EPSILON
@@ -247,7 +264,7 @@ def build_payoff_plan(
         ):
             minimum_shortfall = True
             warnings.append(
-                f"{month_label}: budget of ${monthly_budget:,.0f}/mo can't cover the "
+                f"{month_label}: budget of ${monthly_budget_amount:,.0f}/mo can't cover the "
                 "minimum payments on all cards."
             )
 
@@ -291,7 +308,7 @@ def build_payoff_plan(
             if budget <= _EPSILON:
                 break
             months_left = max(1, _months_between(on, bucket.promo_end) + 1)  # type: ignore[arg-type]
-            need = bucket.remaining / months_left
+            need = money_up(bucket.remaining / months_left)
             applied = _pay_bucket(bucket, min(need, budget), on)
             paid_this_month[s.card.id] += applied
             budget -= applied
@@ -301,9 +318,13 @@ def build_payoff_plan(
             if budget <= _EPSILON:
                 break
             months_left = max(1, _months_between(on, s.card.target_date) + 1)  # type: ignore[arg-type]
-            need = s.remaining / months_left
-            extra = min(max(0.0, need - paid_this_month[s.card.id]), s.remaining, budget)
-            if extra > 0:
+            need = money_up(s.remaining / months_left)
+            extra = min(
+                max(ZERO, need - paid_this_month[s.card.id]),
+                s.remaining,
+                budget,
+            )
+            if extra > ZERO:
                 applied = _pay_card(s, extra, on)
                 paid_this_month[s.card.id] += applied
                 budget -= applied
@@ -326,9 +347,9 @@ def build_payoff_plan(
 
         # Record payments and detect payoffs.
         rows: list[dict[str, Any]] = []
-        month_total = 0.0
+        month_total = ZERO
         for s in active:
-            payment = round(paid_this_month[s.card.id], 2)
+            payment = money(paid_this_month[s.card.id])
             month_total += payment
             total_paid += payment
             if s.paid and s.payoff_month is None:
@@ -337,13 +358,17 @@ def build_payoff_plan(
                 {
                     "card_id": s.card.id,
                     "name": s.card.name,
-                    "payment": payment,
-                    "interest": round(interest_this_month.get(s.card.id, 0.0), 2),
-                    "remaining": round(max(0.0, s.remaining), 2),
+                    "payment": json_money(payment),
+                    "interest": json_money(interest_this_month.get(s.card.id, ZERO)),
+                    "remaining": json_money(max(ZERO, s.remaining)),
                 }
             )
         schedule.append(
-            {"month": month_label, "payments": rows, "total_payment": round(month_total, 2)}
+            {
+                "month": month_label,
+                "payments": rows,
+                "total_payment": json_money(month_total),
+            }
         )
 
     # Per-card summary + feasibility.
@@ -373,11 +398,11 @@ def build_payoff_plan(
             feasible = False
             when = s.deadline.isoformat() if s.deadline else "the horizon"
             scheduled_extra = sum(
-                max(0.0, float(amount))
-                for amount in (extra_payments_by_month or {}).values()
+                (max(ZERO, money(amount)) for amount in extra_payments_by_month.values()),
+                start=ZERO,
             )
-            funding = f"${monthly_budget:,.0f}/mo"
-            if scheduled_extra > 0:
+            funding = f"${monthly_budget_amount:,.0f}/mo"
+            if scheduled_extra > ZERO:
                 funding += f" plus ${scheduled_extra:,.0f} in scheduled extra payments"
             warnings.append(
                 f"{s.card.name} can't be paid off by {when} with "
@@ -387,12 +412,12 @@ def build_payoff_plan(
             {
                 "id": s.card.id,
                 "name": s.card.name,
-                "starting_balance": round(s.card.balance, 2),
+                "starting_balance": json_money(money(s.card.balance)),
                 "apr": s.card.apr,
                 "deadline": s.deadline.isoformat() if s.deadline else None,
                 "payoff_month": s.payoff_month,
                 "on_time": on_time,
-                "total_interest": round(s.total_interest, 2),
+                "total_interest": json_money(s.total_interest),
             }
         )
     if not all(s.paid for s in states):
@@ -402,20 +427,20 @@ def build_payoff_plan(
         )
 
     return {
-        "monthly_budget": round(monthly_budget, 2),
+        "monthly_budget": json_money(monthly_budget_amount),
         "start_month": f"{start.year:04d}-{start.month:02d}",
         "feasible": feasible,
         "warnings": warnings,
         "cards": card_summaries,
         "schedule": schedule,
-        "total_interest": round(total_interest, 2),
-        "total_paid": round(total_paid, 2),
+        "total_interest": json_money(total_interest),
+        "total_paid": json_money(total_paid),
         "months_to_debt_free": len(schedule) if all(s.paid for s in states) else None,
-        "initial_extra_payment": round(max(0.0, initial_extra_payment), 2),
+        "initial_extra_payment": json_money(initial_extra_amount),
         "extra_payments_by_month": {
-            month: round(max(0.0, float(amount)), 2)
+            month: json_money(max(ZERO, money(amount)))
             for month, amount in extra_payments_by_month.items()
-            if amount > 0
+            if decimal_value(amount) > ZERO
         },
     }
 
@@ -437,8 +462,8 @@ def cards_from_accounts(
     for a in accounts:
         if str(a.get("type")) != "credit":
             continue
-        balance = float(a.get("balance") or 0.0)
-        owed = -balance if balance < 0 else 0.0
+        balance = decimal_value(a.get("balance"))
+        owed = money(-balance) if balance < ZERO else ZERO
         if owed <= _EPSILON:
             continue
         acc_id = str(a.get("id") or a.get("name"))
@@ -451,7 +476,7 @@ def cards_from_accounts(
             end = p.get("end_date")
             promos.append(
                 Promo(
-                    balance=float(p.get("balance") or 0.0),
+                    balance=json_money(money(p.get("balance"))),
                     apr=float(p.get("apr") or 0.0),
                     end_date=date.fromisoformat(end) if isinstance(end, str) and end else end,
                 )
@@ -460,10 +485,13 @@ def cards_from_accounts(
             Card(
                 id=acc_id,
                 name=name,
-                balance=owed,
+                balance=json_money(owed),
                 apr=float(a.get("apr") or 0.0),
-                min_payment=max(0.0, float(a.get("minimum_payment") or 0.0))
-                or None,
+                min_payment=(
+                    json_money(money(a.get("minimum_payment")))
+                    if decimal_value(a.get("minimum_payment")) > ZERO
+                    else None
+                ),
                 promos=promos,
                 target_date=target,
             )
@@ -516,19 +544,25 @@ def essentials_reserve(analysis: dict[str, Any]) -> tuple[float, dict[str, float
     commute. It is a suggested default the user can override.
     """
     tree = analysis.get("spending_tree") or []
-    breakdown: dict[str, float] = {}
+    amounts: dict[str, Decimal] = {}
     for bucket in tree:
         for cat in bucket.get("categories", []):
             for sub in cat.get("subcategories", []):
                 leaf = str(sub.get("subcategory") or "")
                 if leaf in _RESERVE_LEAVES:
-                    breakdown[leaf] = breakdown.get(leaf, 0.0) + abs(
-                        float(sub.get("total") or 0.0)
+                    amounts[leaf] = amounts.get(leaf, ZERO) + abs(
+                        decimal_value(sub.get("total"))
                     )
-    days = float(analysis.get("period_days") or analysis.get("lookback_days") or 30) or 30
-    scale = 30.0 / days
-    breakdown = {k: round(v * scale, 2) for k, v in breakdown.items()}
-    return round(sum(breakdown.values()), 2), breakdown
+    days = decimal_value(
+        analysis.get("period_days") or analysis.get("lookback_days") or 30
+    )
+    scale = Decimal("30") / (days or Decimal("30"))
+    breakdown = {
+        key: json_money(money(value * scale))
+        for key, value in amounts.items()
+    }
+    total = sum((money(value) for value in breakdown.values()), start=ZERO)
+    return json_money(total), breakdown
 
 
 def payoff_from_snapshot(
@@ -591,19 +625,26 @@ def payoff_from_snapshot(
     # caller passes an explicit override.
     auto_reserve, reserve_breakdown = essentials_reserve(analysis)
     reserve_auto = reserve is None
-    reserve_amount = auto_reserve if reserve is None else max(0.0, float(reserve))
+    reserve_amount = (
+        money(auto_reserve)
+        if reserve is None
+        else money(max(ZERO, decimal_value(reserve)))
+    )
 
     derived = monthly_budget is None
     if monthly_budget is None:
-        surplus = float(analysis.get("total_inflow") or 0.0) - float(
-            analysis.get("total_outflow") or 0.0
+        surplus = decimal_value(analysis.get("total_inflow")) - decimal_value(
+            analysis.get("total_outflow")
         )
         earmarked = sum(
-            float(g.get("monthly_contribution") or 0.0)
-            for g in goals
-            if str(g.get("kind")) != "debt_payoff"
+            (
+                decimal_value(g.get("monthly_contribution"))
+                for g in goals
+                if str(g.get("kind")) != "debt_payoff"
+            ),
+            start=ZERO,
         )
-        monthly_budget = max(0.0, surplus - earmarked - reserve_amount)
+        monthly_budget = money(max(ZERO, surplus - earmarked - reserve_amount))
 
     plan = build_payoff_plan(
         cards,
@@ -615,7 +656,7 @@ def payoff_from_snapshot(
     plan["derived_budget"] = derived
     plan["scope"] = "all_cards"
     plan["has_debt_goal"] = has_debt_goal
-    plan["essentials_reserve"] = reserve_amount
+    plan["essentials_reserve"] = json_money(reserve_amount)
     plan["essentials_reserve_auto"] = reserve_auto
     plan["essentials_reserve_breakdown"] = reserve_breakdown
     return plan

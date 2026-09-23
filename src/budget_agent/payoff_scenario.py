@@ -9,6 +9,7 @@ from statistics import median
 from typing import Any, TypedDict
 
 from .payoff import payoff_from_snapshot
+from .payoff_scenario_types import ScenarioCapacity, ScenarioFeasibility
 
 _VARIABLE_ESSENTIALS = {
     "groceries",
@@ -105,7 +106,12 @@ def _goal_months_remaining(goal: dict[str, Any], today: date) -> int | None:
         target_date = max(dates) if dates else None
     if target_date is None:
         return None
-    return max(1, math.ceil((target_date - today).days / 30.4375))
+    calendar_months = (
+        (target_date.year - today.year) * 12
+        + target_date.month
+        - today.month
+    )
+    return max(1, calendar_months)
 
 
 def _goal_allocation_rows(
@@ -356,7 +362,7 @@ def _periodic_obligation_profile(
     if len(dates) >= 2:
         gaps = [
             max(1, round((later - earlier).days / 30))
-            for earlier, later in zip(dates, dates[1:])
+            for earlier, later in zip(dates, dates[1:], strict=False)
         ]
         typical_gap = int(round(median(gaps)))
         if typical_gap >= 2:
@@ -1177,7 +1183,7 @@ def suggest_extra_income(analysis: dict[str, Any]) -> list[dict[str, Any]]:
         if len(dates) >= 2:
             intervals = [
                 (later - earlier).days
-                for earlier, later in zip(dates, dates[1:])
+                for earlier, later in zip(dates, dates[1:], strict=False)
             ]
             typical_gap = median(intervals) if intervals else 365
             if typical_gap <= 35:
@@ -1210,11 +1216,33 @@ def suggest_extra_income(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     return suggestions
 
 
-def build_payoff_scenario(
+def _regular_monthly_income(
+    analysis: dict[str, Any],
+    cash_flow_plan: dict[str, Any],
+) -> float:
+    scenarios = cash_flow_plan.get("scenarios") or []
+    if scenarios:
+        regular_income = sum(
+            float(item.get("amount") or 0.0)
+            for period in scenarios[0].get("pay_periods") or []
+            for item in period.get("scheduled_income") or []
+            if item.get("category") == "paycheck"
+        )
+        if regular_income > 0:
+            return regular_income
+    return (
+        float(analysis.get("total_inflow") or 0.0)
+        * 30.0
+        / max(1.0, float(analysis.get("period_days") or 30.0))
+    )
+
+
+def _calculate_scenario_capacity(
     analysis: dict[str, Any],
     cash_flow_plan: dict[str, Any],
     goals: list[dict[str, Any]],
     *,
+    today: date,
     utility_history: UtilityHistorySnapshot | None = None,
     extra_income: list[dict[str, Any]] | None = None,
     spending_adjustments: dict[str, float] | None = None,
@@ -1222,16 +1250,13 @@ def build_payoff_scenario(
     budget_baseline: list[dict[str, Any]] | None = None,
     debt_allocation_percent: float = 100.0,
     monthly_debt_extra: float | None = None,
-    validate_feasibility: bool = True,
-) -> dict[str, Any]:
-    """Build an editable proposal and a deterministic payoff feasibility result."""
+) -> ScenarioCapacity:
     spending = _spending_rows(
         analysis,
         spending_adjustments or {},
         spending_adjustment_reasons or {},
         budget_baseline,
     )
-    today = date.today()
     utility_forecast = _utility_forecast(
         spending,
         utility_history,
@@ -1314,22 +1339,39 @@ def build_payoff_scenario(
         extra_payments_by_month=extra_payments,
         start=today,
     )
-    regular_income = 0.0
-    scenarios = cash_flow_plan.get("scenarios") or []
-    if scenarios:
-        regular_income = sum(
-            float(item.get("amount") or 0.0)
-            for period in scenarios[0].get("pay_periods") or []
-            for item in period.get("scheduled_income") or []
-            if item.get("category") == "paycheck"
-        )
-    if regular_income <= 0:
-        regular_income = (
-            float(analysis.get("total_inflow") or 0.0)
-            * 30.0
-            / max(1.0, float(analysis.get("period_days") or 30.0))
-        )
+    return ScenarioCapacity(
+        today=today,
+        spending=spending,
+        utility_forecast=utility_forecast,
+        baseline_extra=baseline_extra,
+        essential_delta=essential_delta,
+        spending_savings=spending_savings,
+        safe_before_floor=safe_before_floor,
+        safe_extra=safe_extra,
+        allocation_percent=allocation_percent,
+        has_debt=has_debt,
+        portfolio_rows=portfolio_rows,
+        requested_extra=requested_extra,
+        minimum_total=minimum_total,
+        streams=streams,
+        uses_estimated_income=uses_estimated,
+        extra_debt_total=extra_debt_total,
+        extra_goal_total=extra_goal_total,
+        extra_unassigned_total=extra_unassigned_total,
+        extra_payments=extra_payments,
+        plan=plan,
+        regular_income=_regular_monthly_income(analysis, cash_flow_plan),
+        non_debt_total=sum(row["planned_monthly"] for row in portfolio_rows),
+    )
 
+
+def _evaluate_scenario_feasibility(
+    analysis: dict[str, Any],
+    cash_flow_plan: dict[str, Any],
+    capacity: ScenarioCapacity,
+    *,
+    validate_feasibility: bool,
+) -> ScenarioFeasibility:
     reasons: list[str] = []
     advisories: list[str] = []
     unconfirmed_minimums = [
@@ -1351,7 +1393,7 @@ def build_payoff_scenario(
         )
     uncategorized = [
         row
-        for row in spending
+        for row in capacity.spending
         if row["review_required"] and row["current_monthly"] > 0
     ]
     if uncategorized:
@@ -1366,7 +1408,7 @@ def build_payoff_scenario(
         )
     unexplained_overrides = [
         row["label"]
-        for row in spending
+        for row in capacity.spending
         if row["override_requires_reason"] and not row["override_reason"]
     ]
     if unexplained_overrides:
@@ -1375,19 +1417,23 @@ def build_payoff_scenario(
             + ", ".join(unexplained_overrides)
             + "."
         )
-    non_debt_total = sum(row["planned_monthly"] for row in portfolio_rows)
-    if requested_extra + non_debt_total > safe_extra + 0.01:
-        if non_debt_total:
+    if (
+        capacity.requested_extra + capacity.non_debt_total
+        > capacity.safe_extra + 0.01
+    ):
+        if capacity.non_debt_total:
             reasons.append(
-                f"The requested allocations total ${requested_extra + non_debt_total:,.2f} "
-                f"but the calculated safe amount is ${safe_extra:,.2f}."
+                "The requested allocations total "
+                f"${capacity.requested_extra + capacity.non_debt_total:,.2f} "
+                f"but the calculated safe amount is ${capacity.safe_extra:,.2f}."
             )
         else:
             reasons.append(
-                f"The requested ${requested_extra:,.2f} monthly extra payment exceeds "
-                f"the calculated safe amount of ${safe_extra:,.2f}."
+                f"The requested ${capacity.requested_extra:,.2f} monthly extra "
+                f"payment exceeds the calculated safe amount of "
+                f"${capacity.safe_extra:,.2f}."
             )
-    shortfall = round(max(0.0, -safe_before_floor), 2)
+    shortfall = round(max(0.0, -capacity.safe_before_floor), 2)
     shortfall_reason: str | None = None
     if shortfall > 0:
         shortfall_reason = (
@@ -1398,7 +1444,7 @@ def build_payoff_scenario(
         reasons.append(shortfall_reason)
     behind_goals = [
         row["name"]
-        for row in portfolio_rows
+        for row in capacity.portfolio_rows
         if row["deadline_type"] == "hard" and row["on_track"] is False
     ]
     if behind_goals:
@@ -1407,11 +1453,14 @@ def build_payoff_scenario(
             + ", ".join(behind_goals)
             + "."
         )
-    if plan is None and has_debt:
+    if capacity.plan is None and capacity.has_debt:
         reasons.append("No credit-card balances are available for this plan.")
-    elif plan is not None and not plan.get("feasible", True):
-        reasons.extend(str(item) for item in plan.get("warnings") or [])
-    underwater_limit = round(min(500.0, max(0.0, regular_income * 0.05)), 2)
+    elif capacity.plan is not None and not capacity.plan.get("feasible", True):
+        reasons.extend(str(item) for item in capacity.plan.get("warnings") or [])
+    underwater_limit = round(
+        min(500.0, max(0.0, capacity.regular_income * 0.05)),
+        2,
+    )
     underwater_eligible = bool(
         shortfall_reason
         and shortfall <= underwater_limit + 0.01
@@ -1425,10 +1474,10 @@ def build_payoff_scenario(
         status = "feasible" if feasible else "not_feasible"
         if underwater_eligible:
             status = "at_risk"
-        if feasible and (uses_estimated or advisories):
+        if feasible and (capacity.uses_estimated_income or advisories):
             status = "at_risk"
         reasons.extend(advisories)
-        if feasible and uses_estimated:
+        if feasible and capacity.uses_estimated_income:
             reasons.append("The projected timeline depends on estimated extra income.")
     else:
         reasons = []
@@ -1439,13 +1488,34 @@ def build_payoff_scenario(
         (
             direct_survival
             if direct_survival > 0
-            else regular_income - baseline_extra - essential_delta
+            else (
+                capacity.regular_income
+                - capacity.baseline_extra
+                - capacity.essential_delta
+            )
         )
-        + utility_reserve_increment,
+        + capacity.utility_forecast["incremental_monthly_reserve"],
     )
+    return ScenarioFeasibility(
+        reasons=reasons,
+        status=status,
+        feasible=feasible,
+        shortfall=shortfall,
+        underwater_limit=underwater_limit,
+        underwater_eligible=underwater_eligible,
+        minimum_survival=minimum_survival,
+    )
+
+
+def _enrich_plan_and_allocations(
+    capacity: ScenarioCapacity,
+    goals: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    portfolio_rows = [dict(row) for row in capacity.portfolio_rows]
+    plan = capacity.plan
     if plan is not None:
-        plan["minimum_payment_total"] = round(minimum_total, 2)
-        plan["safe_extra_payment"] = round(safe_extra, 2)
+        plan["minimum_payment_total"] = round(capacity.minimum_total, 2)
+        plan["safe_extra_payment"] = round(capacity.safe_extra, 2)
         debt_goals = [
             goal
             for goal in goals
@@ -1493,29 +1563,49 @@ def build_payoff_scenario(
                     2,
                 ),
                 "target_date": None,
-                "required_monthly": round(minimum_total, 2),
-                "desired_monthly": round(minimum_total + requested_extra, 2),
-                "planned_monthly": round(requested_extra, 2),
+                "required_monthly": round(capacity.minimum_total, 2),
+                "desired_monthly": round(
+                    capacity.minimum_total + capacity.requested_extra,
+                    2,
+                ),
+                "planned_monthly": round(capacity.requested_extra, 2),
                 "projected_completion_date": (
-                    _add_months(today, int(plan.get("months_to_debt_free") or 0)).isoformat()
+                    _add_months(
+                        capacity.today,
+                        int(plan.get("months_to_debt_free") or 0),
+                    ).isoformat()
                     if plan.get("months_to_debt_free")
                     else None
                 ),
                 "on_track": bool(plan.get("feasible", True)),
             }
         )
-    total_allocated = round(non_debt_total + requested_extra, 2)
-    portfolio_plan = {
-        "safe_monthly_capacity": round(safe_extra, 2),
+    return portfolio_rows
+
+
+def _build_portfolio_plan(
+    capacity: ScenarioCapacity,
+    feasibility: ScenarioFeasibility,
+    allocations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    total_allocated = round(
+        capacity.non_debt_total + capacity.requested_extra,
+        2,
+    )
+    return {
+        "safe_monthly_capacity": round(capacity.safe_extra, 2),
         "total_allocated": total_allocated,
-        "unallocated": round(max(0.0, safe_extra - total_allocated), 2),
-        "feasible": feasible,
-        "warnings": list(reasons),
-        "extra_income_to_debt": extra_debt_total,
-        "extra_income_to_goals": extra_goal_total,
-        "extra_income_unassigned": extra_unassigned_total,
+        "unallocated": round(
+            max(0.0, capacity.safe_extra - total_allocated),
+            2,
+        ),
+        "feasible": feasibility.feasible,
+        "warnings": list(feasibility.reasons),
+        "extra_income_to_debt": capacity.extra_debt_total,
+        "extra_income_to_goals": capacity.extra_goal_total,
+        "extra_income_unassigned": capacity.extra_unassigned_total,
         "allocations": sorted(
-            portfolio_rows,
+            allocations,
             key=lambda row: (
                 0 if row["deadline_type"] == "hard" else 1,
                 row["priority"],
@@ -1523,8 +1613,15 @@ def build_payoff_scenario(
             ),
         ),
     }
-    cash_flow_recovery = {
-        "monthly_shortfall": shortfall,
+
+
+def _build_cash_flow_recovery(
+    analysis: dict[str, Any],
+    capacity: ScenarioCapacity,
+    feasibility: ScenarioFeasibility,
+) -> dict[str, Any]:
+    return {
+        "monthly_shortfall": feasibility.shortfall,
         "extra_income_reserve_total": round(
             sum(
                 float(item.get("shortfall_reserve_per_occurrence") or 0.0)
@@ -1533,10 +1630,10 @@ def build_payoff_scenario(
                     for value in item.get("occurrences") or []
                     if (
                         (when := _parse_date(value)) is not None
-                        and when <= _add_months(today, 12)
+                        and when <= _add_months(capacity.today, 12)
                     )
                 )
-                for item in streams
+                for item in capacity.streams
             ),
             2,
         ),
@@ -1562,7 +1659,7 @@ def build_payoff_scenario(
                     2,
                 ),
             }
-            for row in spending
+            for row in capacity.spending
             if row["override_allowed"]
             and (
                 row["proposed_monthly"] + 0.01 < row["current_monthly"]
@@ -1585,49 +1682,120 @@ def build_payoff_scenario(
             ),
         ],
     }
+
+
+def _assemble_scenario_response(
+    analysis: dict[str, Any],
+    cash_flow_plan: dict[str, Any],
+    capacity: ScenarioCapacity,
+    feasibility: ScenarioFeasibility,
+    *,
+    budget_baseline: list[dict[str, Any]] | None,
+    monthly_debt_extra: float | None,
+    portfolio_plan: dict[str, Any],
+    cash_flow_recovery: dict[str, Any],
+) -> dict[str, Any]:
     return {
-        "regular_monthly_income": round(regular_income, 2),
-        "minimum_survival_budget": round(minimum_survival, 2),
-        "baseline_safe_extra": round(baseline_extra, 2),
-        "spending_savings": round(spending_savings, 2),
-        "safe_monthly_extra": round(safe_extra, 2),
-        "planned_monthly_extra": round(requested_extra, 2),
+        "regular_monthly_income": round(capacity.regular_income, 2),
+        "minimum_survival_budget": round(feasibility.minimum_survival, 2),
+        "baseline_safe_extra": round(capacity.baseline_extra, 2),
+        "spending_savings": round(capacity.spending_savings, 2),
+        "safe_monthly_extra": round(capacity.safe_extra, 2),
+        "planned_monthly_extra": round(capacity.requested_extra, 2),
         "monthly_debt_extra": (
             round(max(0.0, float(monthly_debt_extra)), 2)
             if monthly_debt_extra is not None
             else None
         ),
-        "debt_allocation_percent": round(allocation_percent, 2),
-        "spending": spending,
+        "debt_allocation_percent": round(capacity.allocation_percent, 2),
+        "spending": capacity.spending,
         "budget_baseline": budget_baseline or suggest_budget_baseline(analysis),
         "survival_budget_breakdown": cash_flow_plan.get(
             "survival_budget_breakdown", []
         ),
-        "utility_forecast": utility_forecast,
-        "extra_income": streams,
+        "utility_forecast": capacity.utility_forecast,
+        "extra_income": capacity.streams,
         "extra_payments_by_month": {
-            month: round(amount, 2) for month, amount in extra_payments.items()
+            month: round(amount, 2)
+            for month, amount in capacity.extra_payments.items()
         },
         "feasibility": {
-            "status": status,
-            "feasible": feasible,
-            "depends_on_estimated_income": uses_estimated,
-            "reasons": reasons,
+            "status": feasibility.status,
+            "feasible": feasibility.feasible,
+            "depends_on_estimated_income": capacity.uses_estimated_income,
+            "reasons": feasibility.reasons,
         },
         "underwater_approval": {
-            "eligible": underwater_eligible,
-            "monthly_shortfall": shortfall,
-            "limit": underwater_limit,
-            "requires_acknowledgement": underwater_eligible,
+            "eligible": feasibility.underwater_eligible,
+            "monthly_shortfall": feasibility.shortfall,
+            "limit": feasibility.underwater_limit,
+            "requires_acknowledgement": feasibility.underwater_eligible,
             "reason": (
                 "This is a planning variance, not permission to spend every "
                 "category to its limit. Unused category amounts must absorb the gap."
-                if underwater_eligible
+                if feasibility.underwater_eligible
                 else None
             ),
         },
         "cash_flow_plan": cash_flow_plan,
-        "plan": plan,
+        "plan": capacity.plan,
         "portfolio_plan": portfolio_plan,
         "cash_flow_recovery": cash_flow_recovery,
     }
+
+
+def build_payoff_scenario(
+    analysis: dict[str, Any],
+    cash_flow_plan: dict[str, Any],
+    goals: list[dict[str, Any]],
+    *,
+    utility_history: UtilityHistorySnapshot | None = None,
+    extra_income: list[dict[str, Any]] | None = None,
+    spending_adjustments: dict[str, float] | None = None,
+    spending_adjustment_reasons: dict[str, str] | None = None,
+    budget_baseline: list[dict[str, Any]] | None = None,
+    debt_allocation_percent: float = 100.0,
+    monthly_debt_extra: float | None = None,
+    validate_feasibility: bool = True,
+) -> dict[str, Any]:
+    """Build an editable proposal through typed deterministic stages."""
+    capacity = _calculate_scenario_capacity(
+        analysis,
+        cash_flow_plan,
+        goals,
+        today=date.today(),
+        utility_history=utility_history,
+        extra_income=extra_income,
+        spending_adjustments=spending_adjustments,
+        spending_adjustment_reasons=spending_adjustment_reasons,
+        budget_baseline=budget_baseline,
+        debt_allocation_percent=debt_allocation_percent,
+        monthly_debt_extra=monthly_debt_extra,
+    )
+    feasibility = _evaluate_scenario_feasibility(
+        analysis,
+        cash_flow_plan,
+        capacity,
+        validate_feasibility=validate_feasibility,
+    )
+    allocations = _enrich_plan_and_allocations(capacity, goals)
+    portfolio_plan = _build_portfolio_plan(
+        capacity,
+        feasibility,
+        allocations,
+    )
+    cash_flow_recovery = _build_cash_flow_recovery(
+        analysis,
+        capacity,
+        feasibility,
+    )
+    return _assemble_scenario_response(
+        analysis,
+        cash_flow_plan,
+        capacity,
+        feasibility,
+        budget_baseline=budget_baseline,
+        monthly_debt_extra=monthly_debt_extra,
+        portfolio_plan=portfolio_plan,
+        cash_flow_recovery=cash_flow_recovery,
+    )

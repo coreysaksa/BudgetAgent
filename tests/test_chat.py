@@ -9,6 +9,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from budget_agent import service
+from budget_agent.chat_workflow import merge_windfalls
 from budget_agent.models import Windfall
 
 
@@ -34,7 +35,7 @@ def test_merge_windfalls_deduplicates_structured_and_extracted_inputs():
         date=date(2026, 8, 20),
         status="confirmed",
     )
-    assert service._merge_windfalls([item], [item]) == [item]
+    assert merge_windfalls([item], [item]) == [item]
 
 
 class _FakeOrchestrator:
