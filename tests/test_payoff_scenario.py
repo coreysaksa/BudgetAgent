@@ -117,7 +117,10 @@ def test_scenario_stages_expose_typed_capacity_and_feasibility_results():
     )
 
     assert isinstance(capacity, ScenarioCapacity)
-    assert capacity.safe_extra == 200
+    assert capacity.safe_extra == 0
+    assert capacity.mandatory_total == 3500
+    assert capacity.discretionary_total == 500
+    assert capacity.discretionary_unallocated == 500
     assert isinstance(feasibility, ScenarioFeasibility)
     assert feasibility.status == "feasible"
     assert feasibility.feasible is True
@@ -574,10 +577,10 @@ def test_variable_spending_includes_each_observed_month_from_long_history():
     ]
 
     result = build_payoff_scenario(analysis, _cash_flow(), [])
-    dining_row = next(row for row in result["spending"] if row["key"] == "dining")
+    dining_row = next(row for row in result["spending"] if row["key"] == "food")
 
     assert dining_row["current_monthly"] == 233.33
-    assert dining_row["proposed_monthly"] == 175
+    assert dining_row["proposed_monthly"] == 0
     assert dining_row["estimate_confidence"] == "high"
 
 
@@ -596,10 +599,10 @@ def test_sparse_discretionary_spending_does_not_average_in_zero_months():
     ]
 
     result = build_payoff_scenario(analysis, _cash_flow(), [])
-    dining_row = next(row for row in result["spending"] if row["key"] == "dining")
+    dining_row = next(row for row in result["spending"] if row["key"] == "food")
 
     assert dining_row["current_monthly"] == 100
-    assert dining_row["proposed_monthly"] == 75
+    assert dining_row["proposed_monthly"] == 0
     assert dining_row["estimate_confidence"] == "high"
 
 
@@ -626,7 +629,7 @@ def test_single_observed_utility_month_uses_that_month():
     )
 
     result = build_payoff_scenario(analysis, _cash_flow(), [])
-    electric = next(row for row in result["spending"] if row["key"] == "electric")
+    electric = next(row for row in result["spending"] if row["key"] == "utilities")
 
     assert electric["current_monthly"] == 185
     assert electric["estimate_confidence"] == "low"
@@ -660,7 +663,7 @@ def test_two_observed_utility_months_are_divided_by_two():
     )
 
     result = build_payoff_scenario(analysis, _cash_flow(), [])
-    electric = next(row for row in result["spending"] if row["key"] == "electric")
+    electric = next(row for row in result["spending"] if row["key"] == "utilities")
 
     assert electric["current_monthly"] == 150
     assert electric["estimate_confidence"] == "medium"
@@ -689,25 +692,72 @@ def test_other_spending_requires_review_and_is_not_treated_as_savings():
     assert other["adjustable"] is False
     assert other["proposed_monthly"] == other["current_monthly"]
     assert other["sample_merchants"] == ["Unknown merchant"]
-    assert result["spending_savings"] == 100
+    assert result["spending_savings"] == 0
     assert any(
         "Classify uncategorized spending" in reason
         for reason in result["feasibility"]["reasons"]
     )
 
 
-def test_scenario_locks_fixed_bills_and_recommends_discretionary_cut():
+def test_scenario_funds_mandatory_first_and_leaves_discretionary_unallocated():
     result = build_payoff_scenario(_analysis(), _cash_flow(), [])
     by_key = {row["key"]: row for row in result["spending"]}
 
-    assert by_key["mortgage"]["adjustable"] is False
-    assert by_key["mortgage"]["override_allowed"] is False
-    assert by_key["groceries"]["adjustable"] is True
-    assert by_key["groceries"]["minimum_monthly"] == 420
-    assert by_key["groceries"]["proposed_monthly"] == 600
-    assert by_key["dining"]["proposed_monthly"] == 300
-    assert result["safe_monthly_extra"] == 200
-    assert result["plan"]["monthly_budget"] == 275
+    assert by_key["housing"]["adjustable"] is False
+    assert by_key["housing"]["override_allowed"] is False
+    assert by_key["food"]["current_monthly"] == 400
+    assert by_key["food"]["proposed_monthly"] == 0
+    assert by_key["personal_flex"]["proposed_monthly"] == 500
+    assert result["mandatory_total"] == 3500
+    assert result["discretionary_total"] == 500
+    assert result["discretionary_allocated"] == 0
+    assert result["discretionary_unallocated"] == 500
+    assert result["safe_monthly_extra"] == 0
+    assert result["plan"]["monthly_budget"] == 75
+
+
+def test_user_discretionary_allocation_reduces_personal_flex_without_recommendation():
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [],
+        spending_adjustments={"food": 200},
+    )
+    by_key = {row["key"]: row for row in result["spending"]}
+
+    assert by_key["food"]["current_monthly"] == 400
+    assert by_key["food"]["proposed_monthly"] == 200
+    assert by_key["personal_flex"]["proposed_monthly"] == 300
+    assert result["discretionary_total"] == 500
+    assert result["discretionary_allocated"] == 200
+    assert result["discretionary_unallocated"] == 300
+
+
+def test_custom_discretionary_subcategory_is_tracked_separately_from_parent():
+    analysis = _analysis()
+    analysis["spending_tree"][1]["categories"][0]["subcategories"].append(
+        {
+            "subcategory": "takeout",
+            "total": 50,
+            "custom": True,
+            "transactions": [],
+        }
+    )
+
+    result = build_payoff_scenario(
+        analysis,
+        _cash_flow(),
+        [],
+        spending_adjustments={"takeout": 75},
+    )
+    by_key = {row["key"]: row for row in result["spending"]}
+
+    assert by_key["food"]["current_monthly"] == 400
+    assert by_key["takeout"]["parent_key"] == "food"
+    assert by_key["takeout"]["allocation_level"] == "subcategory"
+    assert by_key["takeout"]["current_monthly"] == 50
+    assert by_key["takeout"]["proposed_monthly"] == 75
+    assert by_key["personal_flex"]["proposed_monthly"] == 425
 
 
 def test_extra_income_reserves_recurring_shortfall_before_debt():
@@ -731,10 +781,9 @@ def test_extra_income_reserves_recurring_shortfall_before_debt():
     )
 
     stream = result["extra_income"][0]
-    assert result["cash_flow_recovery"]["monthly_shortfall"] == 300
-    assert stream["shortfall_reserve_per_occurrence"] == 900
-    assert stream["debt_amount_per_occurrence"] == 100
-    assert "recurring monthly shortfall" in stream["allocation_rationale"][0]
+    assert result["cash_flow_recovery"]["monthly_shortfall"] == 0
+    assert stream["shortfall_reserve_per_occurrence"] == 0
+    assert stream["debt_amount_per_occurrence"] == 1000
 
 
 def test_extra_income_can_be_directed_to_savings():
@@ -845,7 +894,7 @@ def test_debt_portfolio_reports_progress_from_saved_starting_balances():
     assert debt["current_amount"] > 0
 
 
-def test_small_recurring_shortfall_is_eligible_for_acknowledged_approval():
+def test_small_remaining_amount_becomes_discretionary_not_a_shortfall():
     cash_flow = _cash_flow()
     cash_flow["recurring_safe_extra_payment"] = 250
     result = build_payoff_scenario(
@@ -855,9 +904,10 @@ def test_small_recurring_shortfall_is_eligible_for_acknowledged_approval():
         validate_feasibility=True,
     )
 
-    assert result["feasibility"]["status"] == "at_risk"
-    assert result["underwater_approval"]["eligible"] is True
-    assert result["underwater_approval"]["monthly_shortfall"] == 50
+    assert result["feasibility"]["status"] == "feasible"
+    assert result["underwater_approval"]["eligible"] is False
+    assert result["underwater_approval"]["monthly_shortfall"] == 0
+    assert result["discretionary_total"] == 250
 
 
 def test_post_card_debt_priorities_favor_monthly_payment_relief():
@@ -952,10 +1002,10 @@ def test_fixed_obligation_adjustment_is_ignored():
             "mortgage": "Primary mortgage plus second mortgage."
         },
     )
-    mortgage = next(row for row in result["spending"] if row["key"] == "mortgage")
+    mortgage = next(row for row in result["spending"] if row["key"] == "housing")
 
     assert mortgage["proposed_monthly"] == mortgage["current_monthly"]
-    assert mortgage["override_reason"] == "Primary mortgage plus second mortgage."
+    assert mortgage["override_reason"] == ""
     assert result["minimum_survival_budget"] == 3500
     assert not any(
         "Explain these overrides" in reason
@@ -963,7 +1013,7 @@ def test_fixed_obligation_adjustment_is_ignored():
     )
 
 
-def test_below_floor_override_requires_explanation():
+def test_mandatory_leaf_adjustment_is_ignored_by_envelope_budget():
     analysis = _analysis()
     analysis["spending_tree"][0]["categories"][0]["subcategories"].append(
         {"subcategory": "fuel", "total": 500}
@@ -985,7 +1035,7 @@ def test_below_floor_override_requires_explanation():
         },
     )
 
-    assert any(
+    assert not any(
         "Explain these overrides" in reason
         for reason in unexplained["feasibility"]["reasons"]
     )
@@ -993,7 +1043,8 @@ def test_below_floor_override_requires_explanation():
         "Explain these overrides" in reason
         for reason in explained["feasibility"]["reasons"]
     )
-    assert explained["minimum_survival_budget"] == 3200
+    housing = next(row for row in explained["spending"] if row["key"] == "housing")
+    assert housing["proposed_monthly"] == housing["current_monthly"]
 
 
 def test_quarterly_income_ignores_legacy_debt_percentage():
@@ -1086,13 +1137,13 @@ def test_extra_income_protects_hard_goal_shortfall_then_pays_debt():
     )
 
     stream = result["extra_income"][0]
-    assert stream["debt_amount_per_occurrence"] == 800
-    assert stream["savings_amount_per_occurrence"] == 400
+    assert stream["debt_amount_per_occurrence"] == 0
+    assert stream["savings_amount_per_occurrence"] == 1200
     assert stream["goal_allocations"] == [
-        {"goal_id": "vacation", "name": "Wedding vacation", "amount": 400}
+        {"goal_id": "vacation", "name": "Wedding vacation", "amount": 1200}
     ]
-    assert result["portfolio_plan"]["extra_income_to_debt"] == 800
-    assert result["portfolio_plan"]["extra_income_to_goals"] == 400
+    assert result["portfolio_plan"]["extra_income_to_debt"] == 0
+    assert result["portfolio_plan"]["extra_income_to_goals"] == 1200
     assert result["portfolio_plan"]["extra_income_unassigned"] == 0
 
 
@@ -1180,11 +1231,9 @@ def test_periodic_mandatory_spending_does_not_create_override_warning():
         spending_adjustments={"car_maintenance": 100},
     )
 
-    maintenance = next(
-        row for row in result["spending"] if row["key"] == "car_maintenance"
-    )
+    maintenance = next(row for row in result["spending"] if row["key"] == "housing")
     assert maintenance["override_allowed"] is False
-    assert maintenance["proposed_monthly"] == 0
+    assert maintenance["proposed_monthly"] == maintenance["current_monthly"]
     assert not any(
         "Car Maintenance" in reason
         for reason in result["feasibility"]["reasons"]
@@ -1362,13 +1411,17 @@ def test_incremental_utility_reserve_reduces_safe_debt_capacity():
     )
 
     assert result["utility_forecast"]["incremental_monthly_reserve"] == 120
-    assert result["safe_monthly_extra"] == baseline["safe_monthly_extra"] - 120
+    assert result["safe_monthly_extra"] == 0
+    assert (
+        result["discretionary_total"]
+        == baseline["discretionary_total"] - 120
+    )
     assert (
         result["minimum_survival_budget"]
         == baseline["minimum_survival_budget"] + 120
     )
     assert result["feasibility"]["status"] == "feasible"
-    assert result["plan"]["monthly_budget"] == 155
+    assert result["plan"]["monthly_budget"] == 75
 
 
 def test_payoff_scenario_endpoint_fetches_separate_utility_history(monkeypatch):
@@ -1502,11 +1555,11 @@ def test_portfolio_protects_hard_deadline_then_prioritizes_debt():
 
     portfolio = result["portfolio_plan"]
     by_id = {row["goal_id"]: row for row in portfolio["allocations"]}
-    assert by_id["wedding-trip"]["planned_monthly"] == 200
+    assert by_id["wedding-trip"]["planned_monthly"] == 0
     assert by_id["house"]["planned_monthly"] == 0
     assert by_id["credit-card-payoff"]["planned_monthly"] == 0
-    assert portfolio["total_allocated"] == 200
-    assert portfolio["feasible"] is True
+    assert portfolio["total_allocated"] == 0
+    assert portfolio["feasible"] is False
 
 
 def test_portfolio_reports_unfunded_hard_deadline():

@@ -14,6 +14,10 @@ class ScenarioCapacity:
     baseline_extra: float
     essential_delta: float
     spending_savings: float
+    mandatory_total: float
+    discretionary_total: float
+    discretionary_allocated: float
+    discretionary_unallocated: float
     safe_before_floor: float
     safe_extra: float
     allocation_percent: float

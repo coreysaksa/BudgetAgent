@@ -32,7 +32,32 @@ _SPENDING_LABELS = {
     "hoa": "HOA",
     "hoa_fees": "HOA fees",
     "car_loans": "Car payment",
+    "utilities_connectivity": "Utilities & Connectivity",
+    "food_household": "Food & Household",
+    "debt_minimums": "Debt Minimums",
+    "family_care": "Family Care",
+    "taxes_fees": "Taxes & Required Fees",
+    "other_commitments": "Other Commitments",
+    "dining_convenience": "Dining & Takeout",
+    "shopping_personal": "Shopping & Personal",
+    "travel_experiences": "Travel & Experiences",
+    "health_fitness_recreation": "Health, Fitness & Recreation",
+    "gifts_giving": "Gifts & Giving",
+    "home_lifestyle": "Home & Lifestyle",
+    "transportation_extras": "Transportation Extras",
+    "personal_flex": "Personal Flex",
 }
+_DISCRETIONARY_CATEGORY_ORDER = (
+    "dining_convenience",
+    "entertainment",
+    "shopping_personal",
+    "travel_experiences",
+    "health_fitness_recreation",
+    "gifts_giving",
+    "home_lifestyle",
+    "transportation_extras",
+    "personal_flex",
+)
 _PERIODIC_CANDIDATES = {
     "insurance",
     "car_maintenance",
@@ -45,6 +70,16 @@ class UtilityHistorySnapshot(TypedDict, total=False):
 
     period_days: int | float
     spending_tree: list[dict[str, Any]]
+
+
+def _effective_minimum_payment(account: dict[str, Any]) -> float:
+    known = account.get("minimum_payment")
+    if known is not None:
+        return max(0.0, float(known))
+    balance = abs(float(account.get("balance") or 0.0))
+    if balance <= 0:
+        return 0.0
+    return min(balance, max(25.0, balance * 0.03))
 
 
 def _parse_date(value: Any) -> date | None:
@@ -209,6 +244,7 @@ def _spending_rows(
     adjustment_reasons: dict[str, str],
     budget_baseline: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Build detailed internal rows used for mandatory inference and forecasting."""
     period_days = max(1.0, float(analysis.get("period_days") or 30.0))
     baseline_by_category: dict[str, float] = {}
     for item in budget_baseline or []:
@@ -281,6 +317,196 @@ def _spending_rows(
                         "sample_merchants": _sample_merchants(subcategory),
                     }
                 )
+    return rows
+
+
+def _budget_allocation_rows(
+    analysis: dict[str, Any],
+    adjustments: dict[str, float],
+    adjustment_reasons: dict[str, str],
+    budget_baseline: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build budget-allocation rows at the broad category level.
+
+    Analyzer leaves such as coffee and streaming remain classification details.
+    Built-in leaves roll into their broad parent; only user-created custom leaves
+    remain separate so a user can explicitly budget and track that finer level.
+    """
+    period_days = max(1.0, float(analysis.get("period_days") or 30.0))
+    baseline_by_category: dict[str, float] = {}
+    for item in budget_baseline or []:
+        if not item.get("active", True):
+            continue
+        category = str(item.get("category") or "")
+        baseline_by_category[category] = baseline_by_category.get(category, 0.0) + max(
+            0.0, float(item.get("monthly_amount") or 0.0)
+        )
+    confidence_rank = {"low": 0, "medium": 1, "high": 2}
+    rows: list[dict[str, Any]] = []
+    seen_discretionary: set[str] = set()
+
+    def allocation_row(
+        *,
+        key: str,
+        label: str,
+        bucket: str,
+        current: float,
+        confidence: str,
+        transaction_count: int,
+        sample_merchants: list[str],
+        parent_key: str | None = None,
+        allocation_level: str = "category",
+        review_required: bool = False,
+    ) -> dict[str, Any]:
+        discretionary = bucket == "discretionary" and not review_required
+        proposed = (
+            max(0.0, float(adjustments.get(key, 0.0)))
+            if discretionary
+            else current
+        )
+        return {
+            "key": key,
+            "label": label,
+            "bucket": bucket,
+            "parent_key": parent_key,
+            "allocation_level": allocation_level,
+            "current_monthly": round(current, 2),
+            "proposed_monthly": round(proposed, 2),
+            "minimum_monthly": round(current if bucket == "mandatory" else 0.0, 2),
+            "adjustable": discretionary,
+            "override_allowed": discretionary,
+            "override_reason": str(adjustment_reasons.get(key) or "").strip(),
+            "override_requires_reason": False,
+            "estimate_confidence": confidence,
+            "review_required": review_required,
+            "transaction_count": transaction_count,
+            "sample_merchants": sample_merchants,
+        }
+
+    for bucket in analysis.get("spending_tree") or []:
+        bucket_name = str(bucket.get("bucket") or "")
+        for category in bucket.get("categories") or []:
+            category_key = str(category.get("category") or "personal_flex")
+            broad_current = 0.0
+            broad_confidences: list[str] = []
+            broad_count = 0
+            broad_merchants: list[str] = []
+            for subcategory in category.get("subcategories") or []:
+                key = str(subcategory.get("subcategory") or "other")
+                current, estimate_confidence = _monthly_spending_estimate(
+                    subcategory,
+                    period_days=period_days,
+                )
+                if bucket_name == "mandatory" and key in baseline_by_category:
+                    current = baseline_by_category[key]
+                    estimate_confidence = "high"
+                count = len(subcategory.get("transactions") or [])
+                merchants = _sample_merchants(subcategory)
+                if key == "other":
+                    rows.append(
+                        allocation_row(
+                            key=key,
+                            label="Needs Classification",
+                            bucket=bucket_name,
+                            current=current,
+                            confidence=estimate_confidence,
+                            transaction_count=count,
+                            sample_merchants=merchants,
+                            parent_key=category_key,
+                            allocation_level="review",
+                            review_required=True,
+                        )
+                    )
+                    continue
+                if bool(subcategory.get("custom")) and key != category_key:
+                    rows.append(
+                        allocation_row(
+                            key=key,
+                            label=_SPENDING_LABELS.get(
+                                key, key.replace("_", " ").title()
+                            ),
+                            bucket=bucket_name,
+                            current=current,
+                            confidence=estimate_confidence,
+                            transaction_count=count,
+                            sample_merchants=merchants,
+                            parent_key=category_key,
+                            allocation_level="subcategory",
+                        )
+                    )
+                    if bucket_name == "discretionary":
+                        seen_discretionary.add(key)
+                    continue
+                broad_current += current
+                broad_confidences.append(estimate_confidence)
+                broad_count += count
+                for merchant in merchants:
+                    if merchant not in broad_merchants:
+                        broad_merchants.append(merchant)
+
+            if bucket_name == "mandatory" and category_key in baseline_by_category:
+                broad_current = baseline_by_category[category_key]
+                broad_confidences = ["high"]
+            if broad_current > 0 or bucket_name == "mandatory":
+                confidence = (
+                    min(
+                        broad_confidences,
+                        key=lambda value: confidence_rank.get(value, 0),
+                    )
+                    if broad_confidences
+                    else "low"
+                )
+                rows.append(
+                    allocation_row(
+                        key=category_key,
+                        label=_SPENDING_LABELS.get(
+                            category_key, category_key.replace("_", " ").title()
+                        ),
+                        bucket=bucket_name,
+                        current=broad_current,
+                        confidence=confidence,
+                        transaction_count=broad_count,
+                        sample_merchants=broad_merchants[:3],
+                    )
+                )
+                if bucket_name == "discretionary":
+                    seen_discretionary.add(category_key)
+
+    for key in _DISCRETIONARY_CATEGORY_ORDER:
+        if key in seen_discretionary:
+            continue
+        rows.append(
+            allocation_row(
+                key=key,
+                label=_SPENDING_LABELS.get(key, key.replace("_", " ").title()),
+                bucket="discretionary",
+                current=0.0,
+                confidence="low",
+                transaction_count=0,
+                sample_merchants=[],
+            )
+        )
+    debt_minimums = sum(
+        _effective_minimum_payment(account)
+        for account in analysis.get("accounts") or []
+        if account.get("type") == "credit"
+        and abs(float(account.get("balance") or 0.0)) > 0.01
+    )
+    if debt_minimums > 0 and not any(
+        row["key"] == "debt_minimums" and row["bucket"] == "mandatory"
+        for row in rows
+    ):
+        rows.append(
+            allocation_row(
+                key="debt_minimums",
+                label=_SPENDING_LABELS["debt_minimums"],
+                bucket="mandatory",
+                current=debt_minimums,
+                confidence="high",
+                transaction_count=0,
+                sample_merchants=[],
+            )
+        )
     return rows
 
 
@@ -1251,44 +1477,92 @@ def _calculate_scenario_capacity(
     debt_allocation_percent: float = 100.0,
     monthly_debt_extra: float | None = None,
 ) -> ScenarioCapacity:
-    spending = _spending_rows(
+    detailed_spending = _spending_rows(
+        analysis,
+        spending_adjustments or {},
+        spending_adjustment_reasons or {},
+        budget_baseline,
+    )
+    spending = _budget_allocation_rows(
         analysis,
         spending_adjustments or {},
         spending_adjustment_reasons or {},
         budget_baseline,
     )
     utility_forecast = _utility_forecast(
-        spending,
+        detailed_spending,
         utility_history,
         start=today,
     )
     utility_reserve_increment = utility_forecast["incremental_monthly_reserve"]
+    regular_income = _regular_monthly_income(analysis, cash_flow_plan)
     essential_delta = sum(
         row["current_monthly"] - row["proposed_monthly"]
         for row in spending
         if row["override_allowed"] and row["bucket"] == "mandatory"
     )
-    proposed_discretionary = sum(
+    observed_mandatory = sum(
         row["proposed_monthly"]
         for row in spending
-        if row["adjustable"] and row["bucket"] == "discretionary"
+        if row["bucket"] == "mandatory" and not row["review_required"]
     )
-    current_adjustable = sum(
-        row["current_monthly"] for row in spending if row["adjustable"]
-    )
-    proposed_adjustable = sum(
-        row["proposed_monthly"] for row in spending if row["adjustable"]
-    )
-    spending_savings = current_adjustable - proposed_adjustable
     baseline_extra = max(
         0.0, float(cash_flow_plan.get("recurring_safe_extra_payment") or 0.0)
     )
-    safe_before_floor = (
-        baseline_extra
-        + essential_delta
-        - proposed_discretionary
-        - utility_reserve_increment
+    baseline_discretionary = max(
+        0.0,
+        baseline_extra + essential_delta - utility_reserve_increment,
     )
+    mandatory_total = max(
+        observed_mandatory,
+        regular_income - baseline_discretionary,
+    )
+    discretionary_total = max(0.0, regular_income - mandatory_total)
+    mandatory_gap = mandatory_total - observed_mandatory
+    if mandatory_gap > 0.01:
+        spending.append(
+            {
+                "key": "other_commitments",
+                "label": _SPENDING_LABELS["other_commitments"],
+                "bucket": "mandatory",
+                "parent_key": None,
+                "allocation_level": "category",
+                "current_monthly": round(mandatory_gap, 2),
+                "proposed_monthly": round(mandatory_gap, 2),
+                "minimum_monthly": round(mandatory_gap, 2),
+                "adjustable": False,
+                "override_allowed": False,
+                "override_reason": "",
+                "override_requires_reason": False,
+                "estimate_confidence": "medium",
+                "review_required": False,
+                "transaction_count": 0,
+                "sample_merchants": [],
+            }
+        )
+    explicit_discretionary = sum(
+        row["proposed_monthly"]
+        for row in spending
+        if row["bucket"] == "discretionary"
+        and not row["review_required"]
+        and row["key"] != "personal_flex"
+    )
+    personal_flex = next(
+        (
+            row
+            for row in spending
+            if row["bucket"] == "discretionary"
+            and row["key"] == "personal_flex"
+            and not row.get("parent_key")
+        ),
+        None,
+    )
+    discretionary_unallocated = max(0.0, discretionary_total - explicit_discretionary)
+    if personal_flex is not None:
+        personal_flex["proposed_monthly"] = round(discretionary_unallocated, 2)
+    discretionary_allocated = min(discretionary_total, explicit_discretionary)
+    safe_before_floor = discretionary_total - explicit_discretionary - discretionary_unallocated
+    spending_savings = 0.0
     safe_extra = max(0.0, safe_before_floor)
     allocation_percent = min(100.0, max(0.0, float(debt_allocation_percent)))
     has_debt = any(
@@ -1310,7 +1584,7 @@ def _calculate_scenario_capacity(
         else recommended_debt_extra
     )
     minimum_total = sum(
-        max(0.0, float(account.get("minimum_payment") or 0.0))
+        _effective_minimum_payment(account)
         for account in analysis.get("accounts") or []
         if account.get("type") == "credit"
         and abs(float(account.get("balance") or 0.0)) > 0.01
@@ -1346,6 +1620,10 @@ def _calculate_scenario_capacity(
         baseline_extra=baseline_extra,
         essential_delta=essential_delta,
         spending_savings=spending_savings,
+        mandatory_total=mandatory_total,
+        discretionary_total=discretionary_total,
+        discretionary_allocated=discretionary_allocated,
+        discretionary_unallocated=discretionary_unallocated,
         safe_before_floor=safe_before_floor,
         safe_extra=safe_extra,
         allocation_percent=allocation_percent,
@@ -1360,7 +1638,7 @@ def _calculate_scenario_capacity(
         extra_unassigned_total=extra_unassigned_total,
         extra_payments=extra_payments,
         plan=plan,
-        regular_income=_regular_monthly_income(analysis, cash_flow_plan),
+        regular_income=regular_income,
         non_debt_total=sum(row["planned_monthly"] for row in portfolio_rows),
     )
 
@@ -1637,35 +1915,7 @@ def _build_cash_flow_recovery(
             ),
             2,
         ),
-        "recommended_reductions": [
-            {
-                "key": row["key"],
-                "label": row["label"],
-                "current_monthly": row["current_monthly"],
-                "target_monthly": (
-                    round(max(row["minimum_monthly"], row["current_monthly"] * 0.9), 2)
-                    if row["key"] == "groceries"
-                    and abs(row["proposed_monthly"] - row["current_monthly"]) < 0.01
-                    else row["proposed_monthly"]
-                ),
-                "monthly_savings": round(
-                    row["current_monthly"]
-                    - (
-                        max(row["minimum_monthly"], row["current_monthly"] * 0.9)
-                        if row["key"] == "groceries"
-                        and abs(row["proposed_monthly"] - row["current_monthly"]) < 0.01
-                        else row["proposed_monthly"]
-                    ),
-                    2,
-                ),
-            }
-            for row in capacity.spending
-            if row["override_allowed"]
-            and (
-                row["proposed_monthly"] + 0.01 < row["current_monthly"]
-                or row["key"] == "groceries"
-            )
-        ],
+        "recommended_reductions": [],
         "debt_priorities_after_cards": _debt_priorities_after_cards(analysis),
         "guidance": [
             (
@@ -1673,8 +1923,9 @@ def _build_cash_flow_recovery(
                 "before sending the remainder to debt."
             ),
             (
-                "Reduce adjustable categories such as groceries and discretionary "
-                "spending until recurring income covers recurring obligations."
+                "If mandatory requirements exceed recurring income, review the "
+                "mandatory amounts and income assumptions before allocating any "
+                "discretionary envelope."
             ),
             (
                 "After credit cards, prioritize non-mortgage debts that release the "
@@ -1700,6 +1951,10 @@ def _assemble_scenario_response(
         "minimum_survival_budget": round(feasibility.minimum_survival, 2),
         "baseline_safe_extra": round(capacity.baseline_extra, 2),
         "spending_savings": round(capacity.spending_savings, 2),
+        "mandatory_total": round(capacity.mandatory_total, 2),
+        "discretionary_total": round(capacity.discretionary_total, 2),
+        "discretionary_allocated": round(capacity.discretionary_allocated, 2),
+        "discretionary_unallocated": round(capacity.discretionary_unallocated, 2),
         "safe_monthly_extra": round(capacity.safe_extra, 2),
         "planned_monthly_extra": round(capacity.requested_extra, 2),
         "monthly_debt_extra": (
