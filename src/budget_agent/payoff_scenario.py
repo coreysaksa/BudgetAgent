@@ -34,7 +34,8 @@ _SPENDING_LABELS = {
     "car_loans": "Car payment",
     "utilities_connectivity": "Utilities & Connectivity",
     "food_household": "Food & Household",
-    "debt_minimums": "Debt Minimums",
+    "debt_minimums": "Credit Card Minimums",
+    "loan_payments": "Loan Payments",
     "family_care": "Family Care",
     "taxes_fees": "Taxes & Required Fees",
     "other_commitments": "Other Commitments",
@@ -99,8 +100,8 @@ _BASELINE_CATEGORY_GROUPS = {
     "essential_pet_care": "family_care",
     "professional_license": "taxes_fees",
     "required_fees": "taxes_fees",
-    "loan_payment": "debt_minimums",
-    "student_loan": "debt_minimums",
+    "loan_payment": "loan_payments",
+    "student_loan": "loan_payments",
     "minimum_debt_payment": "debt_minimums",
 }
 
@@ -489,6 +490,11 @@ def _budget_allocation_rows(
             category_key = str(category.get("category") or "personal_flex")
             for subcategory in category.get("subcategories") or []:
                 key = str(subcategory.get("subcategory") or "other")
+                allocation_category_key = (
+                    _BASELINE_CATEGORY_GROUPS.get(key, category_key)
+                    if bucket_name == "mandatory"
+                    else category_key
+                )
                 current, estimate_confidence = _monthly_spending_estimate(
                     subcategory,
                     period_days=period_days,
@@ -524,7 +530,7 @@ def _budget_allocation_rows(
                             confidence=estimate_confidence,
                             transaction_count=count,
                             sample_merchants=merchants,
-                            parent_key=category_key,
+                            parent_key=allocation_category_key,
                             allocation_level="review",
                             review_required=True,
                             breakdown=details,
@@ -555,7 +561,7 @@ def _budget_allocation_rows(
                     continue
                 add_category_amount(
                     bucket=bucket_name,
-                    category_key=category_key,
+                    category_key=allocation_category_key,
                     amount=current,
                     confidence=estimate_confidence,
                     transaction_count=count,

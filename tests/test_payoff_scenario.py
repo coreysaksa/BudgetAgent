@@ -629,9 +629,13 @@ def test_single_observed_utility_month_uses_that_month():
     )
 
     result = build_payoff_scenario(analysis, _cash_flow(), [])
-    electric = next(row for row in result["spending"] if row["key"] == "utilities")
+    electric = next(
+        row for row in result["spending"]
+        if row["key"] == "utilities_connectivity"
+    )
 
-    assert electric["current_monthly"] == 185
+    assert electric["current_monthly"] == 222
+    assert electric["breakdown"][0]["monthly_amount"] == 185
     assert electric["estimate_confidence"] == "low"
 
 
@@ -663,9 +667,13 @@ def test_two_observed_utility_months_are_divided_by_two():
     )
 
     result = build_payoff_scenario(analysis, _cash_flow(), [])
-    electric = next(row for row in result["spending"] if row["key"] == "utilities")
+    electric = next(
+        row for row in result["spending"]
+        if row["key"] == "utilities_connectivity"
+    )
 
-    assert electric["current_monthly"] == 150
+    assert electric["current_monthly"] == 180
+    assert electric["breakdown"][0]["monthly_amount"] == 150
     assert electric["estimate_confidence"] == "medium"
 
 
@@ -769,6 +777,48 @@ def test_baseline_only_mortgage_appears_under_housing_without_balancing_plug():
     ]
     assert result["mandatory_total"] == 3075
     assert not any(row["key"] == "other_commitments" for row in result["spending"])
+
+
+def test_credit_card_minimums_are_separate_from_other_loan_payments():
+    baseline = [
+        {
+            "id": "baseline-student-loan",
+            "name": "Student Loan",
+            "category": "student_loan",
+            "kind": "fixed",
+            "monthly_amount": 247.26,
+            "source": "inferred",
+            "confidence": "high",
+            "active": True,
+        },
+        {
+            "id": "baseline-goodleap",
+            "name": "GoodLeap",
+            "category": "loan_payment",
+            "kind": "fixed",
+            "monthly_amount": 79.91,
+            "source": "inferred",
+            "confidence": "high",
+            "active": True,
+        },
+    ]
+
+    result = build_payoff_scenario(
+        _analysis(),
+        _cash_flow(),
+        [],
+        budget_baseline=baseline,
+    )
+    by_key = {row["key"]: row for row in result["spending"]}
+
+    assert by_key["debt_minimums"]["label"] == "Credit Card Minimums"
+    assert by_key["debt_minimums"]["proposed_monthly"] == 75
+    assert by_key["loan_payments"]["label"] == "Loan Payments"
+    assert by_key["loan_payments"]["proposed_monthly"] == 327.17
+    assert [item["label"] for item in by_key["loan_payments"]["breakdown"]] == [
+        "Student Loan",
+        "GoodLeap",
+    ]
 
 
 def test_user_discretionary_allocation_reduces_personal_flex_without_recommendation():
