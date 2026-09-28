@@ -118,9 +118,9 @@ def test_scenario_stages_expose_typed_capacity_and_feasibility_results():
 
     assert isinstance(capacity, ScenarioCapacity)
     assert capacity.safe_extra == 0
-    assert capacity.mandatory_total == 3500
-    assert capacity.discretionary_total == 500
-    assert capacity.discretionary_unallocated == 500
+    assert capacity.mandatory_total == 2175
+    assert capacity.discretionary_total == 1825
+    assert capacity.discretionary_unallocated == 1825
     assert isinstance(feasibility, ScenarioFeasibility)
     assert feasibility.status == "feasible"
     assert feasibility.feasible is True
@@ -707,13 +707,68 @@ def test_scenario_funds_mandatory_first_and_leaves_discretionary_unallocated():
     assert by_key["housing"]["override_allowed"] is False
     assert by_key["food"]["current_monthly"] == 400
     assert by_key["food"]["proposed_monthly"] == 0
-    assert by_key["personal_flex"]["proposed_monthly"] == 500
-    assert result["mandatory_total"] == 3500
-    assert result["discretionary_total"] == 500
+    assert by_key["personal_flex"]["proposed_monthly"] == 1825
+    assert result["mandatory_total"] == 2175
+    assert result["discretionary_total"] == 1825
     assert result["discretionary_allocated"] == 0
-    assert result["discretionary_unallocated"] == 500
+    assert result["discretionary_unallocated"] == 1825
     assert result["safe_monthly_extra"] == 0
     assert result["plan"]["monthly_budget"] == 75
+
+
+def test_baseline_only_mortgage_appears_under_housing_without_balancing_plug():
+    analysis = _analysis()
+    analysis["spending_tree"][0]["categories"] = [
+        {
+            "category": "food_household",
+            "subcategories": [{"subcategory": "groceries", "total": 600}],
+        }
+    ]
+    baseline = [
+        {
+            "id": "baseline-mortgage-observed",
+            "name": "Mortgage",
+            "category": "mortgage",
+            "kind": "fixed",
+            "monthly_amount": 2400,
+            "source": "inferred",
+            "confidence": "high",
+            "active": True,
+        },
+        {
+            "id": "baseline-groceries",
+            "name": "Groceries",
+            "category": "groceries",
+            "kind": "variable",
+            "monthly_amount": 600,
+            "source": "inferred",
+            "confidence": "medium",
+            "active": True,
+        },
+    ]
+
+    result = build_payoff_scenario(
+        analysis,
+        _cash_flow(),
+        [],
+        budget_baseline=baseline,
+    )
+    by_key = {row["key"]: row for row in result["spending"]}
+
+    assert by_key["housing"]["proposed_monthly"] == 2400
+    assert by_key["housing"]["breakdown"] == [
+        {
+            "key": "baseline-mortgage-observed",
+            "label": "Mortgage",
+            "monthly_amount": 2400,
+            "source": "inferred",
+            "confidence": "high",
+            "transaction_count": 0,
+            "sample_merchants": [],
+        }
+    ]
+    assert result["mandatory_total"] == 3075
+    assert not any(row["key"] == "other_commitments" for row in result["spending"])
 
 
 def test_user_discretionary_allocation_reduces_personal_flex_without_recommendation():
@@ -727,10 +782,10 @@ def test_user_discretionary_allocation_reduces_personal_flex_without_recommendat
 
     assert by_key["food"]["current_monthly"] == 400
     assert by_key["food"]["proposed_monthly"] == 200
-    assert by_key["personal_flex"]["proposed_monthly"] == 300
-    assert result["discretionary_total"] == 500
+    assert by_key["personal_flex"]["proposed_monthly"] == 1625
+    assert result["discretionary_total"] == 1825
     assert result["discretionary_allocated"] == 200
-    assert result["discretionary_unallocated"] == 300
+    assert result["discretionary_unallocated"] == 1625
 
 
 def test_custom_discretionary_subcategory_is_tracked_separately_from_parent():
@@ -757,7 +812,7 @@ def test_custom_discretionary_subcategory_is_tracked_separately_from_parent():
     assert by_key["takeout"]["allocation_level"] == "subcategory"
     assert by_key["takeout"]["current_monthly"] == 50
     assert by_key["takeout"]["proposed_monthly"] == 75
-    assert by_key["personal_flex"]["proposed_monthly"] == 425
+    assert by_key["personal_flex"]["proposed_monthly"] == 1750
 
 
 def test_extra_income_reserves_recurring_shortfall_before_debt():
@@ -907,7 +962,7 @@ def test_small_remaining_amount_becomes_discretionary_not_a_shortfall():
     assert result["feasibility"]["status"] == "feasible"
     assert result["underwater_approval"]["eligible"] is False
     assert result["underwater_approval"]["monthly_shortfall"] == 0
-    assert result["discretionary_total"] == 250
+    assert result["discretionary_total"] == 1825
 
 
 def test_post_card_debt_priorities_favor_monthly_payment_relief():
@@ -1414,7 +1469,7 @@ def test_incremental_utility_reserve_reduces_safe_debt_capacity():
     assert result["safe_monthly_extra"] == 0
     assert (
         result["discretionary_total"]
-        == baseline["discretionary_total"] - 120
+        == baseline["discretionary_total"] - 220
     )
     assert (
         result["minimum_survival_budget"]
